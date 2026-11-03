@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#070d12" />
+    <meta
+      name="description"
+      content="Aetherfall — an original open-world fantasy adventure. Wield elemental magic, recover the Aether Shards and relight the Beacon."
+    />
+    <title>Aetherfall — Open-World Magic Adventure</title>
+    <link rel="stylesheet" href="/src/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g'%3E%3Cstop stop-color='%23ffe9a8'/%3E%3Cstop offset='1' stop-color='%230b2b33'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='30' fill='url(%23g)'/%3E%3Cpath d='M32 10l5.6 16.4L54 32l-16.4 5.6L32 54l-5.6-16.4L10 32l16.4-5.6z' fill='%23fff6d8'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene" aria-label="Aetherfall game view"></canvas>
+
+      <!-- ============================== HUD ============================== -->
+      <div id="hud" class="hidden">
+        <div class="hud-top-left">
+          <div class="vitals">
+            <div class="vital health">
+              <span class="vital-label">Vitality</span>
+              <div class="vital-track"><span id="health-fill"></span></div>
+              <span class="vital-value" id="health-value">100</span>
+            </div>
+            <div class="vital mana">
+              <span class="vital-label">Aether</span>
+              <div class="vital-track"><span id="mana-fill"></span></div>
+              <span class="vital-value" id="mana-value">100</span>
+            </div>
+            <div class="vital stamina">
+              <span class="vital-label">Stamina</span>
+              <div class="vital-track"><span id="stamina-fill"></span></div>
+              <span class="vital-value" id="stamina-value">100</span>
+            </div>
+          </div>
+          <div class="region-row">
+            <span class="region-mark">✦</span>
+            <span id="region">Wayfarer's Shore</span>
+            <span id="clock">08:24</span>
+          </div>
+          <div id="master-badge" class="master-badge hidden">
+            <span class="master-dot"></span>
+            <span>MASTER</span>
+            <span class="master-flight">F fly</span>
+            <span class="master-keys">` off · [ ] time</span>
+          </div>
+        </div>
+
+        <div class="hud-top-center">
+          <div id="objective" class="objective">
+            <div class="objective-eyebrow">Objective</div>
+            <div class="objective-title" id="objective-title">Awaken</div>
+            <div class="objective-hint" id="objective-hint">Listen to the wisp beside you.</div>
+            <div class="objective-progress" id="objective-progress"></div>
+          </div>
+        </div>
+
+        <div class="hud-top-right">
+          <div class="minimap-wrap">
+            <canvas id="minimap" width="190" height="190"></canvas>
+            <div class="minimap-ring"></div>
+            <div class="minimap-north">N</div>
+            <div class="minimap-frame"></div>
+          </div>
+          <div class="shard-counter" id="shard-counter">
+            <span class="shard-gem">◆</span><span id="shard-count">0</span><span class="shard-total">/ 3</span>
+          </div>
+        </div>
+
+        <div id="crosshair" class="crosshair hidden">
+          <span class="ch-ring"></span>
+          <span class="ch-dot"></span>
+          <span class="ch-arm top"></span>
+          <span class="ch-arm right"></span>
+          <span class="ch-arm bottom"></span>
+          <span class="ch-arm left"></span>
+        </div>
+
+        <div id="aim-lock" class="aim-lock hidden" aria-hidden="true">
+          <i></i><i></i><i></i><i></i>
+        </div>
+
+        <div id="interact" class="interact hidden">
+          <span class="key">E</span>
+          <span id="interact-text">Interact</span>
+        </div>
+
+        <div class="hud-bottom">
+          <div id="spellbar" class="spellbar"></div>
+          <div class="hint-row">
+            <span><b>WASD</b> move</span>
+            <span><b>Shift</b> sprint</span>
+            <span><b>Space</b> jump</span>
+            <span><b>V</b> view</span>
+            <span><b>E</b> interact</span>
+            <span><b>Esc</b> pause</span>
+          </div>
+        </div>
+
+        <div id="form-banner" class="form-banner hidden">
+          <div class="form-title">AETHER FORM</div>
+          <div class="form-track"><span id="form-fill"></span></div>
+          <div class="form-timer" id="form-timer">12.0</div>
+        </div>
+
+        <div id="boss-bar" class="boss-bar hidden">
+          <div class="boss-head">
+            <div class="boss-name" id="boss-name">Warden</div>
+            <div class="boss-phase hidden" id="boss-phase">Phase 1 / 3</div>
+          </div>
+          <div class="boss-track"><span id="boss-fill"></span></div>
+          <div class="boss-pips hidden" id="boss-pips">
+            <span class="boss-pip"></span><span class="boss-pip"></span><span class="boss-pip"></span>
+          </div>
+          <div class="boss-phase-name hidden" id="boss-phase-name"></div>
+        </div>
+
+        <div id="boss-card" class="boss-card hidden" aria-live="polite">
+          <div class="boss-card-kicker" id="boss-card-kicker">The Veil Sovereign</div>
+          <div class="boss-card-name" id="boss-card-name">Vaelor</div>
+          <div class="boss-card-title" id="boss-card-title">Keeper of the Last Dark</div>
+        </div>
+
+        <div id="fps" class="fps hidden">60 fps</div>
+        <div id="vignette" class="vignette"></div>
+        <div id="damage-flash" class="damage-flash"></div>
+        <div id="form-tint" class="form-tint"></div>
+      </div>
+
+      <!-- ============================ DIALOGUE =========================== -->
+      <div id="dialogue" class="dialogue hidden" role="dialog" aria-live="polite">
+        <div class="dialogue-speaker" id="speaker">Wisp</div>
+        <div class="dialogue-text" id="dialogue-text"></div>
+        <div class="dialogue-foot">
+          <button id="dialogue-skip" class="dialogue-skip" type="button">
+            Skip conversation <span class="key">X</span>
+          </button>
+          <div class="dialogue-advance"><span class="key">E</span> continue</div>
+        </div>
+      </div>
+
+      <!-- ============================= TOASTS ============================ -->
+      <div id="toasts" class="toasts" aria-live="polite"></div>
+
+      <!-- ============================ LOADING ============================ -->
+      <div id="loading" class="screen loading">
+        <div class="loading-inner">
+          <div class="loading-sigil">✦</div>
+          <div class="eyebrow">Weaving the isle</div>
+          <div class="loading-bar"><span id="loading-fill"></span></div>
+          <div class="loading-text" id="loading-text">Raising mountains…</div>
+        </div>
+      </div>
+
+      <!-- ============================= TITLE ============================= -->
+      <div id="title" class="screen title-screen hidden">
+        <div class="title-vignette"></div>
+        <div class="title-inner">
+          <div class="eyebrow">An open-world aether fantasy</div>
+          <h1 class="game-title"><span>AETHER</span>FALL</h1>
+          <p class="tagline">The Beacon is dark. The Veil is rising.<br />You are the last spark.</p>
+          <div class="title-actions">
+            <button id="btn-begin" class="btn primary">Begin Journey</button>
+            <button id="btn-continue" class="btn ghost hidden">Continue Journey</button>
+            <button id="btn-settings-title" class="btn ghost">Settings</button>
+          </div>
+          <div class="title-controls">
+            <span><b>WASD</b> move</span>
+            <span><b>Mouse</b> look</span>
+            <span><b>Space</b> jump</span>
+            <span><b>V</b> first / third person</span>
+            <span><b>1–6</b> spells</span>
+            <span><b>E</b> interact</span>
+            <span><b>X</b> skip dialogue</span>
+          </div>
+          <div class="title-foot">A procedural island · original setting · headphones recommended</div>
+        </div>
+      </div>
+
+      <!-- ============================= PAUSE ============================= -->
+      <div id="pause" class="screen overlay hidden">
+        <div class="panel">
+          <div class="eyebrow">The isle waits</div>
+          <h2>Paused</h2>
+          <button id="btn-resume" class="btn primary">Resume</button>
+          <button id="btn-save" class="btn ghost">Save Journey</button>
+          <button id="btn-settings-pause" class="btn ghost">Settings</button>
+          <button id="btn-master" class="btn ghost master-btn">Master Mode <span class="master-tag">TEST</span></button>
+          <button id="btn-title" class="btn ghost danger">Return to Title</button>
+          <p class="panel-note">Your journey autosaves as you explore. Master mode unlocks every power and flight.</p>
+        </div>
+      </div>
+
+      <!-- ============================ REMATCH ============================ -->
+      <div id="rematch" class="screen overlay hidden">
+        <div class="panel">
+          <div class="eyebrow">The ring remembers</div>
+          <h2>Challenge Vaelor</h2>
+          <p class="panel-copy">Choose the phase where the Sovereign begins. Your journey and powers are kept.</p>
+          <button id="btn-rematch-1" class="btn primary">Phase I — The Veil Gathers</button>
+          <button id="btn-rematch-2" class="btn ghost">Phase II — The Mask Cracks</button>
+          <button id="btn-rematch-3" class="btn ghost">Phase III — The Sovereign Unbound</button>
+          <button id="btn-rematch-cancel" class="btn ghost danger">Not Yet</button>
+        </div>
+      </div>
+
+      <!-- ============================ SETTINGS =========================== -->
+      <div id="settings" class="screen overlay hidden">
+        <div class="panel wide">
+          <div class="eyebrow">Tune the experience</div>
+          <h2>Settings</h2>
+          <div class="settings-grid">
+            <label class="setting">
+              <span>Graphics quality</span>
+              <select id="set-quality">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="ultra">Ultra</option>
+              </select>
+            </label>
+            <label class="setting">
+              <span>View</span>
+              <select id="set-view">
+                <option value="third">Third person</option>
+                <option value="first">First person</option>
+              </select>
+            </label>
+            <label class="setting">
+              <span>Mouse sensitivity <em id="set-sensitivity-value">1.0</em></span>
+              <input id="set-sensitivity" type="range" min="0.2" max="3" step="0.1" value="1" />
+            </label>
+            <label class="setting">
+              <span>Field of view <em id="set-fov-value">72</em></span>
+              <input id="set-fov" type="range" min="55" max="100" step="1" value="72" />
+            </label>
+            <label class="setting inline">
+              <span>Soft aim assist</span>
+              <input id="set-aim" type="checkbox" />
+            </label>
+            <label class="setting">
+              <span>Aim cone <em id="set-aim-cone-value">18°</em></span>
+              <input id="set-aim-cone" type="range" min="2" max="45" step="1" value="18" />
+            </label>
+            <label class="setting">
+              <span>Aim strength <em id="set-aim-strength-value">100%</em></span>
+              <input id="set-aim-strength" type="range" min="0" max="1.5" step="0.05" value="1" />
+            </label>
+            <label class="setting">
+              <span>Volume <em id="set-volume-value">70%</em></span>
+              <input id="set-volume" type="range" min="0" max="1" step="0.05" value="0.7" />
+            </label>
+            <label class="setting inline">
+              <span>Invert vertical look</span>
+              <input id="set-invert" type="checkbox" />
+            </label>
+            <label class="setting inline">
+              <span>Show performance</span>
+              <input id="set-fps" type="checkbox" />
+            </label>
+          </div>
+          <button id="btn-settings-close" class="btn primary">Done</button>
+        </div>
+      </div>
+
+      <!-- ============================= DEATH ============================= -->
+      <div id="death" class="screen overlay hidden">
+        <div class="panel death-panel">
+          <div class="eyebrow">The veil closes</div>
+          <h2>The Veil Takes You</h2>
+          <p class="panel-copy">You wake at Emberfall Camp, aching but alive.</p>
+          <button id="btn-respawn" class="btn primary">Wake at Camp</button>
+        </div>
+      </div>
+
+      <!-- ============================= ENDING =========================== -->
+      <div id="ending" class="screen ending hidden">
+        <div class="ending-inner">
+          <div class="eyebrow">The beacon burns again</div>
+          <h2 class="ending-title">Aetherfall</h2>
+          <div id="ending-lines" class="ending-lines"></div>
+          <div id="ending-stats" class="ending-stats"></div>
+          <button id="btn-continue-explore" class="btn primary">Continue Exploring</button>
+        </div>
+      </div>
+
+      <div id="cinematic-bars" class="cinematic-bars hidden"><i></i><i></i></div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
