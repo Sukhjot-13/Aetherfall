@@ -12,6 +12,7 @@ import {
   airControl,
   approach,
   approachAxis,
+  approachVelocity,
   canDodge,
   dodgeDirection,
   dodgeSpeedAt,
@@ -50,6 +51,17 @@ test('approachAxis accelerates faster than it brakes', () => {
 test('approachAxis brakes when reversing direction', () => {
   const reversed = approachAxis(5, -5, 20, 40, 0.1);
   assert.equal(reversed, 1);
+});
+
+test('vector acceleration is consistent across frame rates and diagonals', () => {
+  for (const hz of [30, 60, 120]) {
+    let v = { x: 0, z: 0 };
+    for (let i = 0; i < hz / 5; i++) v = approachVelocity(v.x, v.z, 0, -7.2, 26, 34, 1 / hz);
+    assert.ok(Math.abs(v.z + 5.2) < 1e-6);
+    let diagonal = { x: 0, z: 0 };
+    for (let i = 0; i < hz / 5; i++) diagonal = approachVelocity(diagonal.x, diagonal.z, 7.2 / Math.SQRT2, -7.2 / Math.SQRT2, 26, 34, 1 / hz);
+    assert.ok(Math.abs(Math.hypot(diagonal.x, diagonal.z) - 5.2) < 1e-6);
+  }
 });
 
 test('sprint ramps smoothly and refuses invalid states', () => {

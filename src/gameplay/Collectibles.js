@@ -164,14 +164,19 @@ export class Collectibles {
         continue;
       }
 
+      // Distance-cull: far pickups hide instead of animating + drawing halos.
+      const dist = Math.hypot(item.group.position.x - player.x, item.group.position.z - player.z);
+      if (dist > 90) {
+        if (item.group.visible) item.group.visible = false;
+        continue;
+      }
+      if (!item.group.visible) item.group.visible = true;
       item.phase += dt;
       item.group.position.y = item.baseY + Math.sin(elapsed * 1.5 + item.phase) * 0.16;
       item.core.rotation.y += dt * 1.5;
       item.core.rotation.x += dt * 0.7;
       const pulse = 0.9 + Math.sin(elapsed * 2.6 + item.phase) * 0.12;
       item.halo.scale.setScalar(KINDS[item.kind].size * pulse);
-
-      const dist = Math.hypot(item.group.position.x - player.x, item.group.position.z - player.z);
       if (dist > 1.9 || Math.abs(item.group.position.y - (player.y + 1)) > 2.4) continue;
 
       const spec = KINDS[item.kind];

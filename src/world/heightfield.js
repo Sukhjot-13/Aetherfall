@@ -36,8 +36,33 @@ export function createHeightfield(options = {}) {
   const waterLevel = world.waterLevel;
 
   /**
+   * Mesas: flat-topped plateaus that break the rolling hills into varied
+   * landforms without becoming artificial walls. Each is a broad smoothstep
+   * dome with a flat crown, blended underneath so the flank reads as a
+   * natural bluff. Kept clear of every POI clearing.
+   */
+  const PLATEAUS = [
+    { x: 750, z: 1050, r: 230, h: 30 },
+    { x: -650, z: -1350, r: 210, h: 28 },
+    { x: 1650, z: 650, r: 250, h: 34 },
+  ];
+
+  function plateauLift(x, z) {
+    let lift = 0;
+    for (const p of PLATEAUS) {
+      const d = Math.hypot(x - p.x, z - p.z);
+      if (d > p.r) continue;
+      // Flat crown inside 40%, smooth flank 40%→100% — reads as a mesa cap.
+      const crown = 1 - smoothstep(p.r * 0.38, p.r * 0.92, d);
+      lift += p.h * crown;
+    }
+    return lift;
+  }
+
+  /**
    * Raw terrain before any POI flattening. Continent-scale rolling hills, a
-   * north-south mountain spine and a smooth coastal shelf.
+   * north-south mountain spine, three flat-crowned mesas and a smooth
+   * coastal shelf.
    */
   function rawHeight(x, z) {
     const continent = fbm2(x * 0.0017 + seed * 0.00011, z * 0.0017 - seed * 0.00007, 4, seed);
@@ -45,7 +70,7 @@ export function createHeightfield(options = {}) {
     const ridge = ridged2(x * 0.0019 + 3.1, z * 0.0019 - 1.7, 4, seed + 23);
     const north = smoothstep(80, -380, z);
     const mountain = Math.pow(ridge, 1.55) * 205 * (0.14 + 0.86 * north);
-    const base = 5 + continent * 30 + hills * 1.15 + mountain;
+    const base = 5 + continent * 30 + hills * 1.15 + mountain + plateauLift(x, z);
 
     const d = Math.hypot(x, z) / islandRadius;
     const mask = 1 - smoothstep(0.6, 1.04, d);

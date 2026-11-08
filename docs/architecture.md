@@ -106,8 +106,10 @@ Key members:
 - `_resetRun()` — restores powers, quest, effects, collectibles, structures, altar
   brightness, boss state, time and spawn; also clears rematch state and photo
   mode so a new journey cannot inherit either.
-- `_spawnEnemies()` — ambient spawns plus wardens for active shard stages; reattaches
-  the boss enemy proxy after `Enemies.reset()`.
+- `_spawnEnemies()` — ambient spawns plus wardens for active shard stages,
+  plus three staged stalkers near the camp while the veil hunt is open; syncs
+  lantern visuals with side-quest progress; reattaches the boss enemy proxy
+  after `Enemies.reset()`.
 - `_stageAtLeast(stage)` — quest ordering helper.
 - `toggleMaster()`, `setMaster(on)`, `_applyMaster()` — testing sandbox: all spells/passives, all shards, `FREE` stage, restored beacon, full vitals, unlimited mana (`powers.infinite`), cleared cooldowns; also dismisses an active boss.
 - `toggleFly()`, `_shiftTime(hours)` — master-mode look-direction flight and clock nudging.
@@ -122,13 +124,18 @@ Key members:
   victory instead of replaying the ending.
 - `_dialogueCooldown` — 0.45 s grace after a skip so the same keypress cannot re-open a conversation or fire an interaction.
 - `_save()`, `_manualSave()` — autosave / manual save (master mode is never saved).
-- `_updateInteraction()`, `_interact()`, `_talk(npc)` — proximity prompts and
-  dialogue; the altar offers "Challenge Vaelor" when a save is resumed at
-  `FINALE` and "Challenge Vaelor Again" in `FREE` (opens the rematch overlay).
-  All prompts are suppressed while flying.
-- `_claimShard(id)`, `_questEvent(event)`, `_handleQuestEffect(effect)` — quest progression.
+- `_updateInteraction()`, `_interact()`, `_talk(npc)`, `_wakeLantern()` —
+  proximity prompts and dialogue; the altar offers "Challenge Vaelor" when a
+  save is resumed at `FINALE` and "Challenge Vaelor Again" in `FREE` (opens the
+  rematch overlay). The next Lantern Way lantern offers a wake prompt. All
+  prompts are suppressed while flying.
+- `_claimShard(id)`, `_questEvent(event)`, `_handleQuestEffect(effect)` —
+  quest progression, including mission-complete and side-quest-complete
+  rewards (max vitals).
 - `_cast(id)` — validates and executes a spell, drives HUD cast feedback.
 - `_onEnemyKilled()`, `_onPlayerHit()`, `_onPickup()`, `_onDeath()`, `_respawn()`.
+  `_onEnemyKilled()` now routes through the quest reducer as `enemy-killed` so
+  kills advance the missions and the side quest as well as the kill counter.
   `_respawn()` has an arena branch: if the player died during the boss, it revives,
   resets/restarts the encounter, teleports to the south side of the ring and keeps
   the fight going.
@@ -201,12 +208,14 @@ Versioned save slot. Functions: `createSaveData(snapshot)`,
 deliberately not persisted.
 
 ### `AudioManager.js`
-Fully procedural Web Audio: ambience noise beds, night pad, spell/hit/pickup
-stings. Functions: `constructor(volume)`, `init()`, `setVolume(v)`,
-`toggleMute()`, `setNight(factor)`, `_makeNoise(seconds)`, `_startAmbience()`,
+Fully procedural Web Audio: ambience noise beds (wind, sea wash, night
+insects), night pad, spell/hit/pickup stings. Functions: `constructor(volume)`,
+`init()`, `setVolume(v)`, `toggleMute()`, `setNight(factor)`,
+`setBiomeBlend(shoreDistance)`, `_makeNoise(seconds)`, `_startAmbience()`,
 `_startNightPad()`, `_tone(...)`, `_noise(...)`, `cast(spellId)`, `hit()`,
-`enemyHit()`, `damage()`, `death()`, `jump()`, `dodge()`, `land(force)`,
-`footstep(surface)`, `pickup()`, `quest()`, `beacon()`, `bossIntro()`,
+`enemyHit()`, `enemyDeath()`, `wardenDeath()`, `damage()`, `death()`, `jump()`,
+`doubleJump()`, `dodge()`, `land(force)`, `footstep(surface)` (grass/sand/rock/
+water), `pickup()`, `wisp()`, `talk()`, `quest()`, `beacon()`, `bossIntro()`,
 `bossPhase()`, `bossSlam()`, `bossVolley()`, `bossDeath()`, `ui()`, `error()`.
 
 ---
@@ -284,8 +293,15 @@ Pure camera math (unit-tested). `CAMERA_MODES`, `THIRD_PERSON`, `FIRST_PERSON`,
 `angleDelta`, `compassFraction`.
 
 ### `PlayerModel.js`
-Procedural low-poly character: toon-shaded body, hat, scarf, staff with emissive
-crystal, Aether Form aura, and a separate first-person staff viewmodel.
+Procedural low-poly character, **rebuilt 2026-11-03**: a 3/4-scale young
+traveler with a big friendly face (layered eyes with iris/pupil/catchlight,
+rosy cheeks, soft smile, brows that lift when looking around), wide-brim travel
+hat with red band and teal feather, black fringe and high ponytail tied in
+gold, cream shirt, ox-blood vest with pale trim, teal mantle, orange scarf,
+brown belt with pouch and scroll, knee wraps, lace-up boots, gold ankle rings
+and a carved-wood staff with brass rings, a three-prong claw, bright teal
+crystal, orbiting shards and a visible point light. Aether Form aura and a
+separate first-person staff viewmodel are unchanged in structure.
 
 Functions: `makeGradientMap()`, `toon(color)`, `part(...)`,
 `constructor()`, `_build()`, `_buildViewModel()`, `setFirstPerson(first)`,
@@ -301,11 +317,11 @@ module, and adds
 heel-strike/toe-off ankle roll, body bob and sway, turn banking, landing squash,
 jump stretch, dodge tuck, roll tuck, heavy-landing brace, idle
 weight shift/breathing/head look, cape/scarf/coat-tail/ponytail spring lag, hat
-lag, staff trail, Aether Form hover + ground ring and the first-person staff bob.
-In flight the torso and hips pitch toward the velocity vector and the body banks
-into strafes. The first-person viewmodel has a bare-skinned gripping hand with a
-leather half-glove and three fingers wrapped around the shaft; its position
-pulls inward on portrait/narrow aspect ratios so it stays on screen.
+lag, staff trail, brow lift, Aether Form hover + ground ring and the first-person
+staff bob. In flight the torso and hips pitch toward the velocity vector and the
+body banks into strafes. The first-person viewmodel has a bare-skinned gripping
+hand with a leather half-glove and three fingers wrapped around the shaft; its
+position pulls inward on portrait/narrow aspect ratios so it stays on screen.
 
 ### `gait.js`
 Pure procedural gait maths, unit-tested without a WebGL canvas.
@@ -526,12 +542,19 @@ Functions: `constructor(...)`, `_build()`, `_create(kind,x,y,z,rng)`,
 `update(dt,elapsed)`, `setVisible(visible)`, `reset()`.
 
 ### `questState.js`
-Pure quest reducer. `STAGES`, `STAGE_ORDER`, `createQuestState`, `shardCount`,
+Pure quest reducer. `STAGES`, `STAGE_ORDER`, `MISSIONS` (emberTrial 3, veilHunt
+5), `SIDE_QUEST` (lanternWay 8), `createQuestState`, `totalKills`,
+`missionDone`, `sideQuestDone`, `missionList`, `shardCount`,
 `hasAllShards`, `nextShardLocation`, `questReducer`, `objectiveFor`,
 `objectiveTarget`, `serializeQuest`, `deserializeQuest`.
 
-The `FINALE` objective is now **"Face the Veil Sovereign"** with the hint
-"Vaelor guards the Beacon. Break him." and the temple marker.
+The `RETURN` objective is gated by the two pre-finale missions: the altar
+will not fire `finale` until both are complete (it emits a toast instead).
+`enemy-killed` is the only event that advances missions/side quest; the ember
+trial is open from `SHARDS` onward, the veil hunt only from `RETURN` onward,
+and the lantern way is open for the whole run. The `FINALE` objective is
+**"Face the Veil Sovereign"** with the hint "Vaelor guards the Beacon. Break
+him." and the temple marker.
 
 ### `story.js`
 All narrative text: `SPEAKERS` (wisp, sable, player, beacon, sovereign),
@@ -569,7 +592,8 @@ World constants and POIs: `WORLD`, `LOCATIONS`, `SHARD_LOCATIONS`,
 Island mesh with per-vertex biome colours (sand → grass → rock → snow), detail
 and normal maps. `_vertexColor` layers a mid-scale warm/cool patch mask, an
 altitude cooling term, the same forest mask the tree scatter uses (so woods read
-as dark ground from the air) and slope-gated rock outcrops.
+as dark ground from the air), slope-gated rock outcrops, dirt patches in the
+meadows and a fine grain FBM so close-ups do not look single-coloured.
 Functions: `constructor`, `build()`, `_vertexColor(x,z,h,slope,out)`,
 `setQuality(settings)`. The detail normal map tiles 40× (an earlier 110× tiling
 produced visible diagonal hatching from the air), uses 8× anisotropy, and
@@ -592,38 +616,47 @@ Functions: `constructor(scene,heightfield,settings)`, `build()`,
 `update(elapsed, sky)`.
 
 ### `Vegetation.js`
-Instanced trees (pines + broadleaf), boulders, the player-following grass field
-and night fireflies. Functions: `addWind(material, opts)`,
-`constructor(scene,heightfield,settings)`, `build()`, `_buildTrees()`,
-`_buildRocks()`, `_buildGrass()`, `_fillGrass(center)`, `_buildFireflies()`,
-`_clearOfPOIs(x,z,pad)`, `update(dt,elapsed,playerPos,nightFactor)`,
-`setQuality(settings)`.
+Instanced trees (pines + broadleaf), a second instanced shrub undergrowth,
+boulders, the player-following grass field (with sparse wildflower-tinted
+tufts) and night fireflies. Functions: `addWind(material, opts)`,
+`constructor(scene,heightfield,settings)`, `build()`, `_buildTrees()` (now also
+builds the shrub layer), `_buildRocks()`, `_buildGrass()`, `_fillGrass(center)`,
+`_buildFireflies()`, `_clearOfPOIs(x,z,pad)`, `_flowerTint(x,z)`,
+`update(dt,elapsed,playerPos,nightFactor)`, `setQuality(settings)`.
 
 Grass notes: each tuft is a real seven-triangle fan (tapered blades with a
 dark base and sunlit tip baked into vertex colours), not crossed billboards.
 Per-instance tilt, a world-space clump-noise height mask, gentle HSL brightness
 tints, a beach fade and a rim fade keep the follow-field varied and edge-free.
-`addWind(..., { bothSides: true })` inlines `ShaderChunk.normal_fragment_begin`
-with `float faceDirection = 1.0;`, so the unlit back face of a blade keeps the
-up-facing normal instead of flipping black. The field is a 40 m radius disc
-(`GRASS_RADIUS`) whose instance radii are biased toward the camera
-(`pow(rng, 0.62)`), and it re-centres once the player is 3 m from the last
-centre. The tuft texture is 18 curved overlapping leaves over a thatch base,
-softened with a 1.1 px blur.
+Sparse wildflower tints (cream/pink/blue) are sampled in world space so the
+patches stay fixed while walking. `addWind(..., { bothSides: true })` inlines
+`ShaderChunk.normal_fragment_begin` with `float faceDirection = 1.0;`, so the
+unlit back face of a blade keeps the up-facing normal instead of flipping
+black. The field is a 40 m radius disc (`GRASS_RADIUS`) whose instance radii
+are biased toward the camera (`pow(rng, 0.62)`), and it re-centres once the
+player is 3 m from the last centre.
 
 Tree notes: layered four-cone pines and five-blob broadleaf canopies; trunks are
 three offset cylinder segments plus two branch stubs with a warm emissive term,
-so canopy-shadowed trunks no longer read as black rectangles.
+so canopy-shadowed trunks no longer read as black rectangles. The shrub layer
+is a three-blob blob cluster scattered with the same forest mask (density
+raised), so forests read as depth from the air instead of a single-tree grid.
 
 ### `Structures.js`
-Temple, camp, shard shrines, ruins, waystones, floating islands, clouds and
-crystals, plus shard/beacon state. Functions: `glowMaterial`, `add(...)`,
-`glowSprite(...)`, `constructor(scene,heightfield)`, `build()`, `_heightAt`,
-`_buildTemple()`, `_buildCamp()`, `_buildShrines()`, `_buildRuins()`,
-`_waystone(...)`, `_buildWaystones()`, `_buildFloatingIslands()`,
-`_buildClouds()`, `_buildCrystals()`, `setShardSealed(id,sealed)`, `reset()`,
-`setAltarDimmed(dimmed)`, `collectShard(id)`, `restoreBeacon()`,
-`update(dt,elapsed,questState)`, `setQuality()`.
+Temple, camp, shard shrines, ruins, waystones, the Lantern Way lanterns,
+floating islands, clouds and crystals, plus shard/beacon state. Functions:
+`glowMaterial`, `add(...)`, `glowSprite(...)`, `constructor(scene,heightfield)`,
+`build()`, `_heightAt`, `_buildTemple()`, `_buildCamp()`, `_buildShrines()`,
+`_buildRuins()`, `_waystone(...)`, `_buildWaystones()`, `_buildLanterns()`,
+`setLanternsLit(count)`, `get lanternProgress`, `nextLantern()`,
+`_buildFloatingIslands()`, `_buildClouds()`, `_buildCrystals()`,
+`setShardSealed(id,sealed)`, `reset()`, `setAltarDimmed(dimmed)`,
+`collectShard(id)`, `restoreBeacon()`, `update(dt,elapsed,questState)`,
+`setQuality()`.
+
+The eight Lantern Way lanterns (side quest) are stone posts with a gold
+flame, halo and point light. `setLanternsLit(count)` lights the first *count*
+of them; the next one is shown ringed on the minimap.
 
 `setAltarDimmed(true)` hides the altar crystal and its glow and dims the crystal
 light while the boss holds the arena; the `altar` animation case reads
@@ -693,9 +726,11 @@ Typewriter dialogue with speaker names, choices and a skip path that still fires
 `get progress`.
 
 ### `Minimap.js`
-Pre-baked island minimap with live player/shard/enemy markers.
+Pre-baked island minimap with live player/shard/enemy/lantern markers.
 Functions: `constructor(canvas,world)`, `_project(x,z,scale)`, `_bake()`,
-`get metresPerPixel()`, `draw(player,yaw,state)`.
+`get metresPerPixel()`, `draw(player,yaw,state)` — `state` now also carries
+`lanterns` (geometry) and `lanternLit` (count); lit lanterns are gold, the
+next one is ringed.
 
 ### `Toasts.js`
 Transient notifications. `constructor(doc)`, `push(text,kind,duration)`, `clear()`.
@@ -736,7 +771,7 @@ Single entry point: **`npm test`** (`node --test tests/`).
 | `tests/noise.test.js` | hash/value noise/FBM ranges and determinism |
 | `tests/powers.test.js` | mana, cooldowns, casting, damage, form, infinite mana, serialization |
 | `tests/spells.test.js` | ten-slot hotbar integrity, new attack configs, unlock coverage, mana/cooldown rules |
-| `tests/quest.test.js` | quest reducer stages, shard objectives, FINALE objective |
+| `tests/quest.test.js` | quest reducer stages, shard objectives, FINALE objective, mission gating and side-quest progress |
 | `tests/save.test.js` | save validation, hydration, round-trip |
 | `tests/settings.test.js` | defaults, clamping, aim options, presets incl. ultra, storage |
 | `tests/story.test.js` | every dialogue speaker resolves, Sovereign intro/victory, ending copy, shard fallback |

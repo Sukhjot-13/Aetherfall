@@ -117,11 +117,46 @@
 - [ ] Additional Veil Echo variants for later phases.
 - [ ] Photo-mode depth-of-field / focal-length controls.
 
+## Done 2026-11-03
+
+### Wayfarer redesign + missions/audio/graphics pass
+
+- [x] `PlayerModel` rebuild: 3/4-scale young traveler, bigger friendly face
+      (layered eyes with iris/pupil/catchlight, rosy cheeks, smile, brows that
+      lift on look-around), wide-brim travel hat with red band and teal feather,
+      black fringe + high gold-tied ponytail, cream shirt, ox-blood vest with
+      pale trim, teal mantle, orange scarf, belt with pouch/scroll, knee wraps,
+      lace-up boots, half-glove hands and a carved-wood staff with brass rings,
+      three-prong claw, bright crystal, orbiting shards and a visible light.
+- [x] `questState` gauntlet: Trial of Embers (3 kills, open from SHARDS) and The
+      Turning Veil (5 kills, open from RETURN) must be done before the altar
+      fires the finale; `enemy-killed` is the only event that advances them.
+- [x] Side quest The Lantern Way: eight stone lanterns in a road from the shore
+      to the temple (Structures `_buildLanterns` / `setLanternsLit`); waking
+      them in order deepens stamina, +10 max stamina at the final lantern.
+- [x] Rewards: +12 max health for the ember trial, +12 max mana for the veil
+      hunt, applied once in `Game._handleQuestEffect`.
+- [x] `_spawnEnemies` stages three stalkers near the camp while the veil hunt
+      is open, so the mission is completable without a long wander.
+- [x] Audio: sea-wash and night-insect beds (`setBiomeBlend`, `setNight`),
+      layered cast sounds for all ten spells, `enemyDeath`/`wardenDeath` stings,
+      `doubleJump`/`wisp`/`talk`, water-aware footsteps (grass/sand/rock/water).
+- [x] Graphics: sky warm twilight band and altitude-gated stars, water foam
+      laces and sunset shore warmth, terrain dirt patches + grain FBM,
+      vegetation shrub undergrowth + wildflower-tinted grass tufts.
+- [x] Water: shallow water and shore paddle you back on Space without blocking
+      a normal jump's peak; wading splashes with a water footstep.
+- [x] Minimap shows lit lanterns gold and rings the next one.
+- [x] `npm test` → 153 passing; `npx vite build` OK.
+
+> Baseline: commit `3 November` (5c2d32f, local, unpushed). Everything above is
+> on top of that commit.
+
 ## Verification commands
 
 ```bash
 cd aetherfall
-npm test          # 151 tests
+npm test          # 153 tests
 npx vite build    # bundle check
 npm run dev       # http://127.0.0.1:4173/
 ```

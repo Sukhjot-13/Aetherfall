@@ -5,15 +5,24 @@
 
 import * as THREE from 'three';
 import { createRng } from '../util/rng.js';
+import { fbm2 } from '../util/noise.js';
 import { clamp, smoothstep, TAU } from '../util/math.js';
 import { LOCATIONS } from './locations.js';
-import { createBeamTexture, createCloudTexture, createGlowTexture } from './textures.js';
+import { LocalLights } from './LocalLights.js';
+import { batchStaticMeshes } from './batchStaticMeshes.js';
+import { castleWallColliders } from './landmarkCollision.js';
+import { createBeamTexture, createCloudTexture, createGlowTexture, createNoiseTexture, createStoneTexture, createWoodTexture } from './textures.js';
+
+const _stoneTex = createStoneTexture(256);
+_stoneTex.repeat.set(2, 1);
+const _woodTex = createWoodTexture(256);
+_woodTex.repeat.set(1, 1);
 
 const MAT = {
-  stone: new THREE.MeshStandardMaterial({ color: '#8d8b81', roughness: 0.92, flatShading: true }),
-  stoneDark: new THREE.MeshStandardMaterial({ color: '#5d5e59', roughness: 0.95, flatShading: true }),
-  stoneWarm: new THREE.MeshStandardMaterial({ color: '#a08f74', roughness: 0.9, flatShading: true }),
-  wood: new THREE.MeshStandardMaterial({ color: '#5a4330', roughness: 0.92, flatShading: true }),
+  stone: new THREE.MeshStandardMaterial({ color: '#b8b6aa', map: _stoneTex, roughness: 0.92, flatShading: true }),
+  stoneDark: new THREE.MeshStandardMaterial({ color: '#7e7f78', map: _stoneTex, roughness: 0.95, flatShading: true }),
+  stoneWarm: new THREE.MeshStandardMaterial({ color: '#c4b294', map: _stoneTex, roughness: 0.9, flatShading: true }),
+  wood: new THREE.MeshStandardMaterial({ color: '#b09a7a', map: _woodTex, roughness: 0.92, flatShading: true }),
   cloth: new THREE.MeshStandardMaterial({ color: '#a8433a', roughness: 0.86, flatShading: true, side: THREE.DoubleSide }),
   clothMuted: new THREE.MeshStandardMaterial({ color: '#7d6b4d', roughness: 0.9, flatShading: true, side: THREE.DoubleSide }),
   gold: new THREE.MeshStandardMaterial({
@@ -42,15 +51,60 @@ function add(parent, geometry, material, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz
   mesh.position.set(x, y, z);
   mesh.rotation.set(rx, ry, rz);
   mesh.scale.setScalar(scale);
-  mesh.castShadow = true;
+  // Default off: hundreds of casters doubled the shadow pass. Structural
+  // pieces that need shadows set castShadow = true explicitly.
+  mesh.castShadow = false;
   mesh.receiveShadow = true;
+  mesh.userData.staticStructure = true;
   parent.add(mesh);
   return mesh;
 }
 
-/** A soft additive glow sprite. */
+/** Irregular rock with coherent surface variation and no masonry pattern. */
+function weatheredRock(radius, seed) {
+  const geometry = new THREE.IcosahedronGeometry(radius, 2);
+  const positions = geometry.attributes.position;
+  const colors = new Float32Array(positions.count * 3);
+  for (let i = 0; i < positions.count; i++) {
+    const x = positions.getX(i), y = positions.getY(i), z = positions.getZ(i);
+    const n = fbm2(x * 0.22 + y * 0.14, z * 0.22 - y * 0.1, 3, seed);
+    const scale = 1 + n * 0.19;
+    positions.setXYZ(i, x * scale, y * scale, z * scale);
+    const tone = clamp(0.82 + n * 0.32 + y / radius * 0.10, 0.55, 1.1);
+    colors[i * 3] = tone * 0.96;
+    colors[i * 3 + 1] = tone;
+    colors[i * 3 + 2] = tone * 0.91;
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+/** Repeated small structural details in one draw call. */
+function boxInstances(parent, material, entries, name) {
+  if (!entries.length) return null;
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, entries.length);
+  mesh.name = name;
+  mesh.receiveShadow = true;
+  const dummy = new THREE.Object3D();
+  entries.forEach((entry, i) => {
+    dummy.position.set(...entry.position);
+    dummy.rotation.set(0, entry.yaw ?? 0, entry.roll ?? 0);
+    dummy.scale.set(...entry.scale);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.computeBoundingSphere();
+  parent.add(mesh);
+  return mesh;
+}
+
+/** A soft additive glow sprite. Texture is shared — previously every call
+ *  allocated its own 128px canvas texture. */
+const _sharedGlowMap = createGlowTexture(128, 'rgba(255,255,255,0.95)', 'rgba(255,255,255,0)');
 function glowSprite(color, size = 4, opacity = 0.7) {
-  const map = createGlowTexture(128, 'rgba(255,255,255,0.95)', 'rgba(255,255,255,0)');
+  const map = _sharedGlowMap;
   const material = new THREE.SpriteMaterial({
     map,
     color,
@@ -96,11 +150,576 @@ export class Structures {
     this._buildShrines();
     this._buildRuins();
     this._buildWaystones();
+    this._buildLanterns();
+    this._buildFrontier();
+    this._buildWaterfall();
     this._buildFloatingIslands();
     this._buildClouds();
     this._buildCrystals();
+    const dynamic = new Set(this.runeRings);
+    for (const item of this.animated) {
+      if (item.mesh) dynamic.add(item.mesh);
+      if (item.crystal) dynamic.add(item.crystal);
+      if (item.site) {
+        dynamic.add(item.site.shard);
+        dynamic.add(item.site.ring);
+        dynamic.add(item.site.seal);
+      }
+    }
+    for (const lantern of this.lanterns ?? []) dynamic.add(lantern.flame);
+    this.batchedDrawCalls = batchStaticMeshes(this.group, dynamic);
     this.scene.add(this.group);
+    this.localLights = new LocalLights(this.scene, this.group);
     return this;
+  }
+
+  /**
+   * Stormpeak waterfall: a high mountain spring spills over a cliff ledge
+   * at (-340,-240). A scrolling streak texture gives the fall motion, a
+   * foam pool and drifting mist sprites sell the impact, and a shallow
+   * rock channel carries the stream in. Procedural — no downloaded assets.
+   */
+  _buildWaterfall() {
+    // Mesa falls: a freestanding rock tower on the southern mesa edge
+    // (750,1150) spilling toward the low southern valley. A wedge side
+    // faces open grass so the sheet reads from outside the plateau.
+    const x = 750;
+    const z = 1150;
+    const baseGround = this._heightAt(x, z);
+    const topY = baseGround + 26;
+    const fall = 24;
+    const g = new THREE.Group();
+    g.position.set(x, topY, z);
+    g.rotation.y = 1.14; // sheet normal faces the southern valley camera
+    this.group.add(g);
+
+    // Cliff anchoring the fall: a broad rock face behind the sheet so the
+    // ledge never floats in the air when seen from below.
+    const cliffMat = new THREE.MeshStandardMaterial({ color: '#b8b4a8', roughness: 0.95, flatShading: true, side: THREE.DoubleSide });
+    const face = add(g, new THREE.CylinderGeometry(2.2, 6.5, fall + 4, 7, 1, true), cliffMat, 0, -fall / 2 - 1.5, -1.8);
+    face.castShadow = false;
+    // Stream channel on the ledge feeding the fall.
+    const channelMat = cliffMat;
+    add(g, new THREE.BoxGeometry(4.5, 0.5, 10), channelMat, 0, -0.25, 3.5);
+    const streamMat = new THREE.MeshStandardMaterial({ color: '#7ec8e8', roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.85, emissive: '#20404f', emissiveIntensity: 0.4 });
+    add(g, new THREE.BoxGeometry(2.6, 0.12, 9), streamMat, 0, 0.05, 3.5).castShadow = false;
+
+    // Falling sheet: canvas streaks scrolling downward.
+    const canvas = document.createElement('canvas');
+    canvas.width = 128; canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(150,210,240,0.55)';
+    ctx.fillRect(0, 0, 128, 256);
+    const wrng = createRng(5555);
+    for (let i = 0; i < 90; i++) {
+      const sx = wrng.range(0, 128);
+      const sy = wrng.range(0, 256);
+      const len = wrng.range(30, 120);
+      ctx.fillStyle = `rgba(255,255,255,${wrng.range(0.25, 0.85)})`;
+      ctx.fillRect(sx, sy, wrng.range(1, 3), len);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(1, 2.2);
+    const sheetMat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, opacity: 0.92, roughness: 0.3, metalness: 0.05, side: THREE.DoubleSide, emissive: '#2a4a5f', emissiveIntensity: 0.35 });
+    const sheet = new THREE.Mesh(new THREE.PlaneGeometry(3.4, fall, 1, 1), sheetMat);
+    sheet.position.set(0, -fall / 2, 3.2);
+    sheet.castShadow = false;
+    sheet.receiveShadow = false;
+    g.add(sheet);
+    this.waterfallSheet = sheet;
+    this.waterfallTex = tex;
+
+    // Foam pool disc at the base.
+    const foam = new THREE.Mesh(new THREE.CircleGeometry(5, 20), new THREE.MeshStandardMaterial({ color: '#d8f0f8', transparent: true, opacity: 0.75, roughness: 0.4 }));
+    foam.rotation.x = -Math.PI / 2;
+    foam.position.set(0, -fall + 0.35, 2.5);
+    g.add(foam);
+    // Mist.
+    const mist = glowSprite('#d8f0f8', 7, 0.28);
+    mist.position.set(0, -fall + 2.2, 2.5);
+    g.add(mist);
+    this.animated.push({ type: 'glowPulse', sprite: mist, base: 0.28, phase: 0.4 });
+    // Ledge lip blocks so the stream visibly pours over.
+    for (const [lx, lz] of [[-2.2, 0], [2.2, 0], [-1.2, -1.5], [1.4, -2]]) {
+      add(g, new THREE.DodecahedronGeometry(0.5, 0), channelMat, lx, 0.2, lz);
+    }
+  }
+
+  /** Expanded-world frontier: mine, castle, village, crypt, sky-temple.
+   *  Each site sits on its own flattened POI so the 34× island reads as
+   *  intentional places rather than empty heightfield. */
+  _buildFrontier() {
+    const f = LOCATIONS.frontier ?? [];
+    const byId = Object.fromEntries(f.map((l) => [l.id, l]));
+
+    // --- Aether Mine: cliff-shaft entrance, timber frames, ore glow ---
+    const mine = byId.aetherMine;
+    if (mine) {
+      const g = new THREE.Group();
+      g.position.set(mine.x, this._heightAt(mine.x, mine.z), mine.z);
+      this.group.add(g);
+      // Uneven weathered rock uses its own mineral surface rather than the
+      // coursed masonry texture used by buildings.
+      const rockDetail = createNoiseTexture({ size: 128, scale: 14, octaves: 3, seed: 997, contrast: 0.7 });
+      const rockMat = new THREE.MeshStandardMaterial({ color: '#8b8d80', map: rockDetail, roughness: 1, vertexColors: true, flatShading: true });
+      const face = add(g, weatheredRock(6.5, 991), rockMat, 0, 3.6, -7);
+      face.scale.set(1.5, 0.95, 0.55);
+      face.rotation.set(0.2, 0.5, 0.1);
+      const lip = add(g, weatheredRock(3.4, 993), rockMat, -5.5, 2.4, -4.5);
+      lip.scale.set(1.4, 0.8, 0.5);
+      lip.rotation.set(-0.15, 0.9, 0.2);
+      const scree = add(g, weatheredRock(2.2, 995), rockMat, 6.5, 1.1, -3.5);
+      scree.scale.set(1.6, 0.7, 0.6);
+      scree.rotation.set(0.3, -0.4, -0.1);
+      // Mouth: inset tunnel with side walls and a warm back-glow so it
+      // reads as a hole in rock, not a black box on a slab.
+      const mouth = add(g, new THREE.BoxGeometry(4.6, 3.8, 0.6), new THREE.MeshStandardMaterial({ color: '#141210', roughness: 1 }), 1.2, 1.9, -2.9);
+      mouth.castShadow = false;
+      add(g, new THREE.BoxGeometry(0.5, 3.8, 2.2), MAT.stoneDark, -1.1, 1.9, -3.4);
+      add(g, new THREE.BoxGeometry(0.5, 3.8, 2.2), MAT.stoneDark, 3.5, 1.9, -3.4);
+      // Collapsed boards make the blocked, non-enterable shaft clear.
+      for (const [y, angle] of [[1.2, 0.18], [2.35, -0.15]]) {
+        add(g, new THREE.BoxGeometry(4.25, 0.32, 0.24), MAT.wood, 1.2, y, -2.52, 0, 0, angle);
+      }
+      // timber frames
+      for (const [x, z] of [[1.2, -1.8], [1.2, 3.5]]) {
+        add(g, new THREE.CylinderGeometry(0.28, 0.34, 5.2, 6), MAT.wood, x - 2.2, 2.6, z);
+        add(g, new THREE.CylinderGeometry(0.28, 0.34, 5.2, 6), MAT.wood, x + 2.2, 2.6, z);
+        add(g, new THREE.BoxGeometry(5.4, 0.5, 0.8), MAT.wood, x, 5, z);
+      }
+      // A worked approach leads the eye into the shaft: two iron rails,
+      // sleepers, braced frames and a battered ore cart.
+      const iron = new THREE.MeshStandardMaterial({ color: '#4c504d', metalness: 0.68, roughness: 0.58 });
+      const sleepers = [];
+      for (let z = -2; z <= 19; z += 1.25) {
+        sleepers.push({ position: [1.2, 0.08, z], scale: [2.25, 0.16, 0.3] });
+      }
+      boxInstances(g, MAT.wood, sleepers, 'Mine sleepers');
+      for (const x of [0.43, 1.97]) {
+        add(g, new THREE.BoxGeometry(0.12, 0.13, 21.5), iron, x, 0.19, 8.5);
+      }
+      for (const z of [-1.8, 3.5]) {
+        for (const side of [-1, 1]) {
+          add(g, new THREE.BoxGeometry(0.3, 2.4, 0.32), MAT.wood,
+            1.2 + side * 1.65, 4.1, z, 0, 0, side * -0.6);
+        }
+      }
+      const cart = new THREE.Group(); cart.position.set(1.2, 0, 9.5); g.add(cart);
+      add(cart, new THREE.BoxGeometry(2, 0.2, 2.5), MAT.wood, 0, 0.8, 0);
+      for (const side of [-1, 1]) {
+        const plank = add(cart, new THREE.BoxGeometry(0.16, 0.85, 2.5), MAT.wood, side * 0.9, 1.26, 0);
+        plank.rotation.z = side * -0.12;
+        for (const z of [-0.8, 0.8]) {
+          const wheel = add(cart, new THREE.CylinderGeometry(0.39, 0.39, 0.14, 12), iron, side * 1.05, 0.38, z);
+          wheel.rotation.z = Math.PI / 2;
+          const hub = add(cart, new THREE.CylinderGeometry(0.13, 0.13, 0.17, 10), MAT.wood, side * 1.14, 0.38, z);
+          hub.rotation.z = Math.PI / 2;
+        }
+      }
+      add(cart, new THREE.BoxGeometry(2, 0.85, 0.16), MAT.wood, 0, 1.26, -1.17);
+      add(cart, new THREE.BoxGeometry(2, 0.85, 0.16), MAT.wood, 0, 1.26, 1.17);
+      const rubble = [];
+      const mineRng = createRng(451);
+      for (let i = 0; i < 38; i++) {
+        const side = i % 2 ? -1 : 1;
+        const x = 1.2 + side * mineRng.range(3.3, 10.5);
+        const z = mineRng.range(-6, 11);
+        const size = mineRng.range(0.18, 0.68);
+        rubble.push({ position: [x, size * 0.25, z], scale: [size * 1.3, size * 0.55, size], yaw: mineRng.range(0, Math.PI) });
+      }
+      boxInstances(g, MAT.stoneDark, rubble, 'Mine scree');
+      // ore veins + cart crates
+      const ore = glowMaterial('#76cbb9', 0.65);
+      for (const [x, y, z, scale] of [[-6.2, 1.6, -3.6, 0.44], [-5.2, 2.8, -4, 0.3],
+        [5.2, 1.2, -3.4, 0.4], [6.5, 1.6, -3.5, 0.3]]) {
+        const vein = add(g, new THREE.OctahedronGeometry(scale, 0), ore, x, y, z);
+        vein.rotation.set(0.3, 0.5, -0.25);
+      }
+      add(g, new THREE.BoxGeometry(1.4, 1, 1.4), MAT.wood, 4.5, 0.5, 1);
+      add(g, new THREE.BoxGeometry(1.2, 0.8, 1.2), MAT.stoneWarm, 5.8, 0.4, -0.5);
+      const gl = glowSprite('#8ef2e0', 6, 0.35); gl.position.set(1.2, 3, -1.5); g.add(gl);
+      this.animated.push({ type: 'glowPulse', sprite: gl, base: 0.35, phase: 0 });
+      this.colliders.push({ x: mine.x + 1.2, z: mine.z - 3, r: 2.6 });
+      this.colliders.push({ x: mine.x - 6, z: mine.z - 4, r: 3 });
+    }
+
+    // --- Embercastle: keep, four corner towers, gatehouse, banner glow ---
+    const castle = byId.emberCastle;
+    if (castle) {
+      const g = new THREE.Group();
+      g.position.set(castle.x, this._heightAt(castle.x, castle.z), castle.z);
+      this.group.add(g);
+      const castleMap = _stoneTex.clone();
+      castleMap.repeat.set(6, 2.5);
+      castleMap.needsUpdate = true;
+      const stone = new THREE.MeshStandardMaterial({ color: '#c3c0b3', map: castleMap, roughness: 0.95 });
+      const roof = new THREE.MeshStandardMaterial({ color: '#5a3a3a', roughness: 0.9, flatShading: true });
+      // A walkable open gate, layered ramparts, and a tall central keep.
+      // The wall and tower details are instanced so the silhouette stays rich
+      // without turning every merlon and arrow slit into a separate draw call.
+      const masonry = (geometry, x, y, z) => {
+        const mesh = add(g, geometry, stone, x, y, z);
+        mesh.castShadow = true;
+        return mesh;
+      };
+      masonry(new THREE.BoxGeometry(26, 7, 2), 0, 3.5, -12);
+      masonry(new THREE.BoxGeometry(2, 7, 26), -12, 3.5, 0);
+      masonry(new THREE.BoxGeometry(2, 7, 26), 12, 3.5, 0);
+      for (const side of [-1, 1]) {
+        masonry(new THREE.BoxGeometry(10.5, 7, 2), side * 7.75, 3.5, 12);
+      }
+      masonry(new THREE.BoxGeometry(10, 15, 10), 0, 7.5, -3);
+      add(g, new THREE.BoxGeometry(10.7, 0.45, 10.7), MAT.stoneDark, 0, 13.7, -3);
+      add(g, new THREE.ConeGeometry(7.8, 5.5, 4), roof, 0, 17.6, -3, 0, Math.PI / 4, 0);
+      const merlons = [];
+      for (let p = -10; p <= 10; p += 2.5) {
+        for (const side of [-1, 1]) {
+          merlons.push({ position: [p, 7.55, side * 12], scale: [1.35, 1.1, 2.1] });
+          if (Math.abs(p) > 3 || side < 0) {
+            merlons.push({ position: [side * 12, 7.55, p], scale: [2.1, 1.1, 1.35] });
+          }
+        }
+      }
+      boxInstances(g, stone, merlons, 'Curtain battlements');
+      for (const [tx, tz] of [[-12, -12], [12, -12], [-12, 12], [12, 12]]) {
+        masonry(new THREE.CylinderGeometry(3, 3.5, 12, 12), tx, 6, tz);
+        add(g, new THREE.CylinderGeometry(3.3, 3.3, 0.45, 12), MAT.stoneDark, tx, 10.9, tz);
+        add(g, new THREE.ConeGeometry(3.9, 4.8, 12), roof, tx, 14.5, tz);
+        add(g, new THREE.CylinderGeometry(0.1, 0.12, 1.4, 6), MAT.gold, tx, 17.4, tz);
+        this.colliders.push({ x: castle.x + tx, z: castle.z + tz, r: 3.4 });
+      }
+      const embrasures = [];
+      for (const [tx, tz] of [[-12, -12], [12, -12], [-12, 12], [12, 12]]) {
+        for (const angle of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+          const x = tx + Math.sin(angle) * 3.03;
+          const z = tz + Math.cos(angle) * 3.03;
+          for (const y of [4.8, 8.3]) {
+            embrasures.push({ position: [x, y, z], yaw: angle, scale: [0.36, 1.4, 0.10] });
+          }
+        }
+      }
+      const slit = new THREE.MeshStandardMaterial({ color: '#171c1c', roughness: 1 });
+      boxInstances(g, slit, embrasures, 'Tower arrow slits');
+      // The gate opening is clear in both the geometry and collision layout.
+      for (const side of [-1, 1]) {
+        masonry(new THREE.BoxGeometry(1.8, 8.5, 4.2), side * 3.35, 4.25, 13);
+        const leaf = add(g, new THREE.BoxGeometry(2.1, 5.2, 0.25), MAT.wood, side * 2.6, 2.6, 14.2);
+        leaf.rotation.y = side * 1.1;
+      }
+      masonry(new THREE.BoxGeometry(8.5, 2.6, 4.2), 0, 7.2, 13);
+      const gateCrests = [];
+      for (let x = -3.5; x <= 3.5; x += 1.75) {
+        gateCrests.push({ position: [x, 9.1, 13], scale: [1.0, 1.2, 4.3] });
+      }
+      boxInstances(g, stone, gateCrests, 'Gate battlements');
+      // Frames, banners, and a worn approach make the gate legible at range.
+      for (const side of [-1, 1]) {
+        add(g, new THREE.BoxGeometry(0.35, 4.8, 0.24), MAT.stoneDark, side * 2.5, 2.4, 15.2);
+        const banner = add(g, new THREE.BoxGeometry(1.0, 3.4, 0.10), MAT.cloth, side * 4.3, 5.6, 15.2);
+        banner.rotation.z = side * 0.035;
+        add(g, new THREE.BoxGeometry(0.16, 2.2, 0.12), MAT.gold, side * 4.3, 5.65, 15.28);
+      }
+      const paving = [];
+      const pavingRng = createRng(728);
+      for (let row = 0; row < 10; row++) {
+        for (let col = -1; col <= 1; col++) {
+          const width = pavingRng.range(1.3, 1.7);
+          paving.push({ position: [col * 1.55 + (row % 2) * 0.2, 0.03, 15 + row * 1.65], scale: [width, 0.08, 1.45], yaw: pavingRng.range(-0.04, 0.04) });
+        }
+      }
+      boxInstances(g, MAT.stoneWarm, paving, 'Castle approach');
+      // Narrow colliders follow the walls, leaving the central gate usable.
+      this.colliders.push(...castleWallColliders(castle));
+      // ember torches
+      for (const [tx, tz] of [[-3.2, 14.6], [3.2, 14.6]]) {
+        add(g, new THREE.OctahedronGeometry(0.4, 0), glowMaterial('#ffb066', 2.2), tx, 6.2, tz);
+        const tl = glowSprite('#ffb066', 3, 0.5); tl.position.set(tx, 6.2, tz); g.add(tl);
+        const li = new THREE.PointLight('#ffb066', 2.2, 18, 1.8); li.position.set(tx, 6.2, tz); g.add(li);
+        this.animated.push({ type: 'fire', light: li, base: 2.2, phase: tx });
+      }
+      // courtyard well + crates
+      add(g, new THREE.CylinderGeometry(1.2, 1.4, 1.1, 8), MAT.stoneDark, 6.5, 0.55, 6);
+      add(g, new THREE.BoxGeometry(1.2, 1.2, 1.2), MAT.wood, 5, 0.6, 5);
+      add(g, new THREE.BoxGeometry(1, 1, 1), MAT.wood, 6.2, 0.5, 3);
+      this.colliders.push({ x: castle.x + 0, z: castle.z - 2, r: 5.2 });
+    }
+
+    // --- Saltmere Village: huts, dock, barrels, lamps ---
+    const vil = byId.saltVillage;
+    if (vil) {
+      const g = new THREE.Group();
+      g.position.set(vil.x, this._heightAt(vil.x, vil.z), vil.z);
+      this.group.add(g);
+      const wall = new THREE.MeshStandardMaterial({ color: '#c9b088', roughness: 0.92, flatShading: true });
+      const thatch = new THREE.MeshStandardMaterial({ color: '#8a6a3e', roughness: 0.95, flatShading: true });
+      const rng = createRng(99);
+      const hut = (x, z, ry) => {
+        const h = new THREE.Group(); h.position.set(x, 0, z); h.rotation.y = ry; g.add(h);
+        add(h, new THREE.BoxGeometry(5, 3, 4.2), wall, 0, 1.5, 0);
+        add(h, new THREE.ConeGeometry(3.9, 2.2, 4), thatch, 0, 4.1, 0, 0, Math.PI / 4, 0);
+        add(h, new THREE.BoxGeometry(1.1, 2, 0.3), MAT.wood, 0, 1, 2.15);
+        // Warm emissive window: the village reads inhabited, not abandoned.
+        add(h, new THREE.BoxGeometry(1, 0.9, 0.15), glowMaterial('#ffb45e', 1.6), -1.4, 1.9, 2.15);
+        add(h, new THREE.BoxGeometry(0.9, 0.8, 0.15), glowMaterial('#ffb45e', 1.2), 1.5, 1.7, 2.15);
+        this.colliders.push({ x: vil.x + x, z: vil.z + z, r: 3 });
+      };
+      hut(-9, -6, 0.2); hut(7, -9, -0.4); hut(-6, 8, 0.7); hut(10, 6, -1.1); hut(0, -18, 0.1);
+      // dock toward the sea (local +Z)
+      for (let i = 0; i < 6; i++) add(g, new THREE.BoxGeometry(3.4, 0.3, 2.4), MAT.wood, (i % 2 ? 1.5 : -1.5), 0.6, 16 + i * 2.2);
+      for (let i = 0; i < 3; i++) add(g, new THREE.CylinderGeometry(0.18, 0.22, 3, 5), MAT.wood, i % 2 ? 1.4 : -1.4, 0.4, 18 + i * 5);
+      // barrels + lamps
+      for (let i = 0; i < 4; i++) add(g, new THREE.CylinderGeometry(0.55, 0.6, 1.1, 8), MAT.wood, -3 + i * 1.5, 0.55, 12);
+      for (const [lx, lz] of [[-2, 2], [3, -2], [0, 10]]) {
+        add(g, new THREE.CylinderGeometry(0.12, 0.16, 3.2, 5), MAT.wood, lx, 1.6, lz);
+        const flame = add(g, new THREE.OctahedronGeometry(0.28, 0), glowMaterial('#ffe9a8', 2), lx, 3.4, lz);
+        flame.castShadow = false;
+        const li = new THREE.PointLight('#ffe9a8', 1.6, 14, 1.8); li.position.set(lx, 3.4, lz); g.add(li);
+        this.animated.push({ type: 'fire', light: li, base: 1.6, phase: lx * 0.2 });
+      }
+      this.colliders.push({ x: vil.x + 0, z: vil.z + 18, r: 1.4 });
+    }
+
+    // --- Sunken Crypt: broken arch, sarcophagus vault, moss glows ---
+    const crypt = byId.sunkenCrypt;
+    if (crypt) {
+      const g = new THREE.Group();
+      g.position.set(crypt.x, this._heightAt(crypt.x, crypt.z), crypt.z);
+      this.group.add(g);
+      const moss = new THREE.MeshStandardMaterial({ color: '#5a7d58', roughness: 0.95, flatShading: true });
+      const cryptMass = add(g, new THREE.BoxGeometry(14, 5.5, 10), MAT.stone, 0, 2.75, -4);
+      cryptMass.rotation.y = 0.06;
+      // Mossy broken roofline so the mass reads as a ruin, not a bunker.
+      const roof = add(g, new THREE.BoxGeometry(14.6, 0.9, 10.6), moss, 0, 5.6, -4);
+      roof.rotation.set(0.03, 0.06, -0.02);
+      const roofGap = add(g, new THREE.BoxGeometry(5, 1, 10.6), MAT.stoneDark, 4.5, 6.05, -4);
+      roofGap.rotation.set(0.08, 0.06, 0.05);
+      const porch = add(g, new THREE.BoxGeometry(7, 4.4, 5), MAT.stoneDark, 0, 2.2, 1.8);
+      porch.rotation.y = -0.04;
+      const inner = add(g, new THREE.BoxGeometry(4.2, 3, 0.5), new THREE.MeshStandardMaterial({ color: '#101a14', roughness: 1 }), 0, 1.5, 1.6);
+      inner.castShadow = false;
+      // broken arch + pillars
+      const arch = new THREE.Group(); arch.position.set(0, 0, 6); g.add(arch);
+      add(arch, new THREE.TorusGeometry(3.2, 0.4, 6, 16, Math.PI), MAT.stone, 0, 0.4, 0);
+      for (const [px, pz] of [[-5, 5], [5, 5], [-5, -2], [5, -2]]) {
+        add(g, new THREE.CylinderGeometry(0.55, 0.7, 4.2, 7), MAT.stone, px, 2.1, pz);
+        this.colliders.push({ x: crypt.x + px, z: crypt.z + pz, r: 0.9 });
+      }
+      // sarcophagus + crypt glow
+      add(g, new THREE.BoxGeometry(3.6, 1, 2), MAT.stoneWarm, 0, 0.5, 4);
+      add(g, new THREE.BoxGeometry(3, 0.5, 1.6), MAT.stone, 0, 1.2, 4);
+      for (let i = 0; i < 4; i++) {
+        add(g, new THREE.OctahedronGeometry(0.35, 0), glowMaterial('#8ef2e0', 1), -4 + i * 2.6, 1 + (i % 2) * 0.6, -1);
+      }
+      const cg = glowSprite('#8ef2e0', 5, 0.3); cg.position.set(0, 3, 4); g.add(cg);
+      this.animated.push({ type: 'glowPulse', sprite: cg, base: 0.3, phase: 2 });
+      void moss;
+    }
+
+    // --- Sky-Thread Temple: tall spires + sky beam marker ---
+    const skyT = byId.skyTemple;
+    if (skyT) {
+      const g = new THREE.Group();
+      g.position.set(skyT.x, this._heightAt(skyT.x, skyT.z), skyT.z);
+      this.group.add(g);
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * TAU;
+        const px = Math.cos(a) * 14, pz = Math.sin(a) * 14;
+        add(g, new THREE.CylinderGeometry(1.1, 1.6, 14 + i * 2, 8), MAT.stone, px, 7 + i, pz);
+        add(g, new THREE.ConeGeometry(1.6, 4, 8), MAT.stoneDark, px, 16 + i * 2, pz);
+        this.colliders.push({ x: skyT.x + px, z: skyT.z + pz, r: 1.7 });
+      }
+      add(g, new THREE.CylinderGeometry(4, 5, 4, 12), MAT.stoneWarm, 0, 2, 0);
+      const beamMat = new THREE.MeshBasicMaterial({ color: '#ffe9a8', transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 3.4, 180, 12, 1, true), beamMat);
+      beam.position.set(0, 90, 0); g.add(beam);
+      this.animated.push({ type: 'float', mesh: beam, baseY: 90, phase: 0, amp: 0 });
+      const sg = glowSprite('#ffe9a8', 10, 0.4); sg.position.set(0, 5, 0); g.add(sg);
+    }
+
+    // --- Glasshollow: crystal cavern spires, teal glow ---
+    const glass = byId.glassHollow;
+    if (glass) {
+      const g = new THREE.Group();
+      g.position.set(glass.x, this._heightAt(glass.x, glass.z), glass.z);
+      this.group.add(g);
+      const glassMat = glowMaterial('#8ef2e0', 1.5);
+      const glassMat2 = glowMaterial('#c6a8ff', 1.3);
+      const glng = createRng(4242);
+      for (let i = 0; i < 11; i++) {
+        const a = glng.range(0, TAU);
+        const r = glng.range(6, 38);
+        const px = Math.cos(a) * r;
+        const pz = Math.sin(a) * r;
+        const h = glng.range(2.2, 9);
+        const shard = add(g, new THREE.ConeGeometry(glng.range(0.5, 1.2), h, 5), i % 2 ? glassMat : glassMat2, px, h * 0.5 - 0.3, pz, glng.range(-0.18, 0.18), glng.range(0, TAU), glng.range(-0.18, 0.18));
+        shard.castShadow = true;
+        if (i % 3 === 0) this.colliders.push({ x: glass.x + px, z: glass.z + pz, r: 1 });
+      }
+      const gg = glowSprite('#8ef2e0', 9, 0.3); gg.position.set(0, 4, 0); g.add(gg);
+      this.animated.push({ type: 'glowPulse', sprite: gg, base: 0.3, phase: 1.1 });
+    }
+
+    // --- The Ember Wastes: burnt spires + ember glow ---
+    const wastes = byId.emberWastes;
+    if (wastes) {
+      const g = new THREE.Group();
+      g.position.set(wastes.x, this._heightAt(wastes.x, wastes.z), wastes.z);
+      this.group.add(g);
+      const charMat = new THREE.MeshStandardMaterial({ color: '#2b2320', roughness: 0.95, flatShading: true, emissive: '#3a1404', emissiveIntensity: 0.5 });
+      const wnrg = createRng(7771);
+      for (let i = 0; i < 9; i++) {
+        const a = wnrg.range(0, TAU);
+        const r = wnrg.range(8, 44);
+        const px = Math.cos(a) * r;
+        const pz = Math.sin(a) * r;
+        const h = wnrg.range(3, 11);
+        add(g, new THREE.CylinderGeometry(0.5, 1.4, h, 6), charMat, px, h * 0.5 - 0.5, pz, wnrg.range(-0.22, 0.22), wnrg.range(0, TAU), wnrg.range(-0.22, 0.22));
+        if (i % 3 === 0) this.colliders.push({ x: wastes.x + px, z: wastes.z + pz, r: 1.3 });
+      }
+      for (let i = 0; i < 5; i++) {
+        const ex = wnrg.range(-30, 30);
+        const ez = wnrg.range(-30, 30);
+        add(g, new THREE.OctahedronGeometry(0.45, 0), glowMaterial('#ffb066', 2), ex, 0.6, ez);
+        const li = new THREE.PointLight('#ff8a3d', 1.4, 14, 1.8); li.position.set(ex, 1.4, ez); g.add(li);
+        this.animated.push({ type: 'fire', light: li, base: 1.4, phase: ex * 0.3 });
+      }
+      const wg = glowSprite('#ff8a3d', 8, 0.3); wg.position.set(0, 3, 0); g.add(wg);
+      this.animated.push({ type: 'glowPulse', sprite: wg, base: 0.3, phase: 2.2 });
+    }
+
+    // --- Moonlit Docks: piers, lamps, crates over the water ---
+    const docks = byId.moonlitDocks;
+    if (docks) {
+      const g = new THREE.Group();
+      g.position.set(docks.x, this._heightAt(docks.x, docks.z), docks.z);
+      this.group.add(g);
+      for (let i = 0; i < 4; i++) {
+        const w = 2.2, d = 14;
+        const pier = new THREE.Group();
+        pier.position.set(-16 + i * 11, 0, 0);
+        pier.rotation.y = (i % 2 ? -1 : 1) * 0.2;
+        for (let j = 0; j < 5; j++) add(pier, new THREE.BoxGeometry(w, 0.25, d / 5), MAT.wood, 0, 0.6, -d / 2 + j * (d / 5));
+        for (let j = 0; j < 4; j++) add(pier, new THREE.CylinderGeometry(0.14, 0.18, 2, 5), MAT.wood, j % 2 ? 0.8 : -0.8, 0.2, -d / 2 + j * 4);
+        g.add(pier);
+        this.colliders.push({ x: docks.x + pier.position.x, z: docks.z + pier.position.z, r: 2 });
+      }
+      for (const [lx, lz] of [[-10, 6], [0, 10], [10, 6]]) {
+        add(g, new THREE.CylinderGeometry(0.12, 0.16, 3, 5), MAT.wood, lx, 1.5, lz);
+        const fl = add(g, new THREE.OctahedronGeometry(0.26, 0), glowMaterial('#d8e8ff', 2), lx, 3.1, lz);
+        fl.castShadow = false;
+        const li = new THREE.PointLight('#bcd6ff', 1.6, 15, 1.8); li.position.set(lx, 3.1, lz); g.add(li);
+        this.animated.push({ type: 'fire', light: li, base: 1.6, phase: lx * 0.2 });
+      }
+      for (let i = 0; i < 5; i++) add(g, new THREE.BoxGeometry(1.1, 1.1, 1.1), MAT.wood, -6 + i * 2, 0.55, -4);
+      const dg = glowSprite('#bcd6ff', 7, 0.3); dg.position.set(0, 4, 0); g.add(dg);
+    }
+
+    // --- Stormspire: twin lightning spires ---
+    const spire = byId.stormSpire;
+    if (spire) {
+      const g = new THREE.Group();
+      g.position.set(spire.x, this._heightAt(spire.x, spire.z), spire.z);
+      this.group.add(g);
+      const stormMat = glowMaterial('#8fb4ff', 1.8);
+      for (const [px, pz, tall] of [[-6, 0, 26], [6, 0, 20], [0, -8, 14], [0, 8, 16]]) {
+        add(g, new THREE.CylinderGeometry(1.4, 2.2, tall, 8), MAT.stone, px, tall / 2, pz);
+        add(g, new THREE.ConeGeometry(1.8, 6, 8), MAT.stoneDark, px, tall + 3, pz);
+        add(g, new THREE.OctahedronGeometry(0.7, 0), stormMat, px, tall + 7, pz);
+        this.colliders.push({ x: spire.x + px, z: spire.z + pz, r: 2 });
+      }
+      const sg = glowSprite('#8fb4ff', 12, 0.35); sg.position.set(0, 12, 0); g.add(sg);
+      this.animated.push({ type: 'glowPulse', sprite: sg, base: 0.35, phase: 0.8 });
+    }
+
+    // --- Frostfjord: ice shards + cold glow at the coast ---
+    const fjord = byId.frostFjord;
+    if (fjord) {
+      const g = new THREE.Group();
+      g.position.set(fjord.x, this._heightAt(fjord.x, fjord.z), fjord.z);
+      this.group.add(g);
+      const iceMat = new THREE.MeshStandardMaterial({ color: '#bfe8ff', roughness: 0.25, metalness: 0.1, flatShading: true, emissive: '#2a5a7f', emissiveIntensity: 0.4 });
+      const frng = createRng(31337);
+      for (let i = 0; i < 8; i++) {
+        const a = frng.range(0, TAU);
+        const r = frng.range(6, 34);
+        const px = Math.cos(a) * r;
+        const pz = Math.sin(a) * r;
+        const h = frng.range(2.5, 8);
+        const ice = add(g, new THREE.ConeGeometry(frng.range(0.5, 1.1), h, 5), iceMat, px, h * 0.5 - 0.4, pz, frng.range(-0.2, 0.2), frng.range(0, TAU), 0);
+        ice.castShadow = true;
+        if (i % 3 === 0) this.colliders.push({ x: fjord.x + px, z: fjord.z + pz, r: 1 });
+      }
+      const fg = glowSprite('#bfe8ff', 8, 0.3); fg.position.set(0, 4, 0); g.add(fg);
+      this.animated.push({ type: 'glowPulse', sprite: fg, base: 0.3, phase: 1.6 });
+    }
+  }
+
+  // Old sailing lanterns of the Lantern Way — the side quest's landmarks.
+  // Eight stone posts in a broken road from the south shore to the temple ring.
+  // Their glow can be woken one by one as the player advances the quest.
+  _buildLanterns() {
+    const defs = [
+      { x: 44, z: 468, r: 3.4 },
+      { x: 62, z: 392, r: 3.2 },
+      { x: 88, z: 310, r: 3.3 },
+      { x: 58, z: 210, r: 3.1 },
+      { x: 10, z: 108, r: 3.4 },
+      { x: -34, z: 8, r: 3.2 },
+      { x: -12, z: -120, r: 3.3 },
+      { x: 8, z: -240, r: 3.5 },
+    ];
+    this.lanterns = [];
+    const stoneMat = new THREE.MeshStandardMaterial({ color: '#6e6c63', roughness: 0.92, flatShading: true });
+    const glowMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color('#8a6a1f').multiplyScalar(0.5),
+      emissive: '#ffd27a',
+      emissiveIntensity: 0.35,
+      roughness: 0.4,
+    });
+    for (const def of defs) {
+      const y = this._heightAt(def.x, def.z);
+      const g = new THREE.Group();
+      g.position.set(def.x, y, def.z);
+      add(g, new THREE.CylinderGeometry(0.55, 0.75, 3.2, 6), stoneMat, 0, 1.6, 0);
+      add(g, new THREE.BoxGeometry(0.72, 0.72, 0.72), stoneMat, 0, 3.2, 0);
+      const flame = add(g, new THREE.OctahedronGeometry(0.34, 0), glowMat.clone(), 0, 3.95, 0);
+      flame.castShadow = false;
+      const halo = glowSprite('#ffd27a', 4.2, 0.0);
+      halo.position.y = 3.95;
+      g.add(halo);
+      const light = new THREE.PointLight('#ffd27a', 0, 30, 1.8);
+      light.position.y = 4.0;
+      light.visible = false; // unlit lanterns must not add shader light cost
+      g.add(light);
+      this.group.add(g);
+      this.lanterns.push({ x: def.x, z: def.z, y, group: g, flame, halo, light, lit: false });
+    }
+  }
+
+  /** Wake the first `count` lanterns along the Lantern Way. */
+  setLanternsLit(count) {
+    if (!this.lanterns) return;
+    for (let i = 0; i < this.lanterns.length; i++) {
+      const lantern = this.lanterns[i];
+      const shouldBeLit = i < count;
+      if (shouldBeLit === lantern.lit) continue;
+      lantern.lit = shouldBeLit;
+      lantern.flame.material.emissiveIntensity = shouldBeLit ? 2.6 : 0.35;
+      lantern.halo.material.opacity = shouldBeLit ? 0.62 : 0.0;
+      lantern.light.intensity = shouldBeLit ? 3.2 : 0;
+      lantern.light.visible = shouldBeLit;
+    }
+  }
+
+  /** Number of lanterns the quest has woken. */
+  get lanternProgress() {
+    return (this.lanterns ?? []).filter((l) => l.lit).length;
+  }
+
+  /** Next unlit lantern the player should seek, if any. */
+  nextLantern() {
+    return (this.lanterns ?? []).find((l) => !l.lit) ?? null;
   }
 
   _heightAt(x, z) {
@@ -601,6 +1220,7 @@ export class Structures {
   reset() {
     this.restored = false;
     this.altarDimmed = false;
+    this.setLanternsLit(0);
     for (const [id, site] of this.shardSites) {
       site.collected = false;
       site.group.visible = true;
@@ -672,9 +1292,13 @@ export class Structures {
   }
 
   /** Animate shards, fire, banner, islands and the beacon. */
-  update(dt, elapsed, questState) {
+  update(dt, elapsed, playerPos) {
     for (const item of this.animated) {
       switch (item.type) {
+        case 'glowPulse': {
+          item.sprite.material.opacity = item.base + Math.sin(elapsed * 1.8 + item.phase) * item.base * 0.35;
+          break;
+        }
         case 'float': {
           item.mesh.position.y = item.baseY + Math.sin(elapsed * 0.8 + item.phase) * item.amp;
           item.mesh.rotation.y += dt * 0.15;
@@ -741,6 +1365,8 @@ export class Structures {
       cloud.sprite.material.opacity = 0.14 + Math.sin(elapsed * 0.1 + cloud.phase) * 0.04;
     }
 
+    if (this.waterfallTex) this.waterfallTex.offset.y = -elapsed * 0.55;
+
     if (this.altar?.restored) {
       const pulse = 0.3 + Math.sin(elapsed * 1.4) * 0.08;
       this.altar.beam.material.opacity = pulse;
@@ -748,6 +1374,7 @@ export class Structures {
       this.altar.beam.scale.z = this.altar.beam.scale.x;
       this.altar.beamGlow.material.opacity = 0.7 + Math.sin(elapsed * 1.6) * 0.15;
     }
+    this.localLights?.update(playerPos);
   }
 
   /** Apply a quality preset (cloud/beam visuals stay). */

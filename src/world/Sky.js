@@ -5,6 +5,7 @@
  */
 
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { clamp, smoothstep, TAU } from '../util/math.js';
 import { WORLD } from './locations.js';
 
@@ -48,7 +49,7 @@ const FRAGMENT = /* glsl */ `
   float fbm(vec2 p) {
     float v = 0.0;
     float a = 0.5;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 3; i++) {
       v += a * vnoise(p);
       p = p * 2.03 + 13.7;
       a *= 0.5;
@@ -73,19 +74,22 @@ const FRAGMENT = /* glsl */ `
 
     // Sun disk + halo.
     float sd = max(dot(d, uSunDir), 0.0);
+    float warmBand = exp(-abs(d.y - 0.06) * 3.2) * (1.0 - uDay) * 0.10;
     sky += uSunColor * pow(sd, 1400.0) * 7.0;
     sky += uSunColor * pow(sd, 26.0) * (0.18 + uDay * 0.32);
+    sky += uSunColor * warmBand * pow(sd, 6.0);
 
     // Moon.
     float md = max(dot(d, -uSunDir), 0.0);
     sky += vec3(0.72, 0.82, 1.0) * pow(md, 2200.0) * 3.0 * (1.0 - uDay);
     sky += vec3(0.35, 0.45, 0.7) * pow(md, 60.0) * 0.15 * (1.0 - uDay);
 
-    // Stars.
+    // Stars — altitude gated so the horizon haze eats the dim ones first.
     vec3 sp = floor(d * 420.0);
     float star = step(0.9977, hash31(sp));
     float twinkle = 0.65 + 0.35 * sin(uTime * 1.6 + hash31(sp + 1.7) * 40.0);
-    sky += vec3(0.78, 0.87, 1.0) * star * (1.0 - uDay) * twinkle * 1.5;
+    float altitude = smoothstep(0.06, 0.28, d.y);
+    sky += vec3(0.78, 0.87, 1.0) * star * altitude * (1.0 - uDay) * twinkle * 1.5;
 
     // Clouds projected onto the dome. Two drifting layers at different speeds
     // give the sky parallax and stop it reading as one flat poster.
@@ -111,6 +115,9 @@ const FRAGMENT = /* glsl */ `
     float haze = exp(-abs(d.y) * 11.0);
     sky = mix(sky, uHorizon * 1.08, haze * 0.32);
     sky += uSunColor * pow(sd, 4.0) * 0.09 * uDay;
+    // Low-altitude mist band: bleaches the horizon so peaks sit in air.
+    float mist = exp(-abs(d.y - 0.015) * 26.0);
+    sky = mix(sky, uHorizon * 1.05, mist * 0.22 * (0.35 + 0.65 * uDay));
 
     gl_FragColor = vec4(sky, 1.0);
     #include <tonemapping_fragment>
@@ -186,21 +193,27 @@ export class Sky {
     this.fog = new THREE.FogExp2(0x9fbfd4, 0.0014);
     scene.fog = this.fog;
 
-    this.hemi = new THREE.HemisphereLight(0xbcd8ff, 0x3b4a2a, 0.55);
+    this.hemi = new THREE.HemisphereLight(0xbcd8ff, 0x3b4a2a, 0.5);
     scene.add(this.hemi);
 
     this.sun = new THREE.DirectionalLight(0xfff3d6, 2.6);
+    // 80m box follows the player so shadows stay crisp everywhere on
+    // the 10600m island; wide enough that tree shadows survive past the
+    // immediate clearing instead of vanishing at the frustum edge.
+    // Frustum follows player in _refresh; bias/normalBias tuned to kill
+    // acne without peter-panning the contact shadow.
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(settings?.shadowMapSize ?? 2048, settings?.shadowMapSize ?? 2048);
-    this.sun.shadow.camera.left = -95;
-    this.sun.shadow.camera.right = 95;
-    this.sun.shadow.camera.top = 95;
-    this.sun.shadow.camera.bottom = -95;
+    this.sun.shadow.camera.left = -80;
+    this.sun.shadow.camera.right = 80;
+    this.sun.shadow.camera.top = 80;
+    this.sun.shadow.camera.bottom = -80;
     this.sun.shadow.camera.near = 1;
-    this.sun.shadow.camera.far = 620;
-    this.sun.shadow.bias = -0.0006;
-    this.sun.shadow.normalBias = 0.045;
-    this.sun.shadow.radius = 2.5;
+    this.sun.shadow.camera.far = 520;
+    this.sun.shadow.bias = -0.00042;
+    this.sun.shadow.normalBias = 0.025;
+    this.sun.shadow.radius = 2.2;
+    this.sun.shadow.camera.updateProjectionMatrix();
     this.sun.target = new THREE.Object3D();
     scene.add(this.sun);
     scene.add(this.sun.target);
@@ -208,6 +221,17 @@ export class Sky {
     this.moon = new THREE.DirectionalLight(PALETTE.moon, 0.35);
     this.moon.target = this.sun.target;
     scene.add(this.moon);
+
+    // Image-based lighting so metals (gold, crystal) and standard
+    // materials reflect something instead of going flat dark. Low
+    // intensity keeps the outdoor sun-keyed look.
+    try {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.environment = envTex;
+      scene.environmentIntensity = 0.35;
+      pmrem.dispose();
+    } catch { /* environment is a bonus, never a boot failure */ }
 
     this._tmpColor = new THREE.Color();
     this._zenith = new THREE.Color();
@@ -286,14 +310,16 @@ export class Sky {
 
     this.fog.color.copy(horizon).lerp(ground, 0.28);
     this.fogColor.copy(this.fog.color);
-    this.fog.density = 0.0011 - 0.00042 * day + 0.0003 * twilight;
+    // Day haze ~0.00062: distant peaks stay grey-blue rock instead of
+    // dissolving into the horizon colour.
+    this.fog.density = 0.00078 - 0.00016 * day + 0.00015 * twilight;
 
     this.hemi.color.copy(zenith);
     this.hemi.groundColor.copy(ground);
-    this.hemi.intensity = 0.22 + 0.74 * day + 0.18 * twilight;
+    this.hemi.intensity = 0.2 + 0.62 * day + 0.16 * twilight;
 
     this.sun.color.copy(sunColor);
-    this.sun.intensity = 3.35 * day + 0.34 * twilight;
+    this.sun.intensity = 2.9 * day + 0.3 * twilight;
     this.moon.intensity = 0.46 * (1 - day);
 
     const snap = 4;

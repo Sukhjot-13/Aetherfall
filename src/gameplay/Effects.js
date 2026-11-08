@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { clamp } from '../util/math.js';
 import { createGlowTexture } from '../world/textures.js';
+import { MELEE_HALF_ANGLE } from './enemyMovement.js';
 
 const FLASH_TEX = createGlowTexture(128, 'rgba(255, 255, 255, 1)', 'rgba(255, 255, 255, 0)');
 
@@ -43,6 +44,8 @@ const PARTICLE_FRAG = /* glsl */ `
 `;
 
 const RING_GEO = new THREE.RingGeometry(0.72, 1, 72, 1);
+const SECTOR_GEO = new THREE.CircleGeometry(1, 48, Math.PI / 2 - MELEE_HALF_ANGLE, MELEE_HALF_ANGLE * 2);
+const DISC_GEO = new THREE.CircleGeometry(1, 48);
 const BEAM_GEO = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
 
 export class Effects {
@@ -116,6 +119,22 @@ export class Effects {
       this.rings.push({ mesh, life: 0, maxLife: 1, radius: 1, from: 0.2, tilt: 0 });
     }
     this.ringCursor = 0;
+
+    // Attack warnings have fixed footprints for the whole windup.
+    this.telegraphs = [];
+    for (let i = 0; i < 48; i++) {
+      const material = new THREE.MeshBasicMaterial({
+        color: '#ff775f', transparent: true, opacity: 0, depthWrite: false,
+        side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2,
+      });
+      const mesh = new THREE.Mesh(SECTOR_GEO, material);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 4;
+      scene.add(mesh);
+      this.telegraphs.push({ mesh, life: 0, maxLife: 1, serial: 0 });
+    }
+    this.telegraphCursor = 0;
 
     // --- beams -----------------------------------------------------------
     this.beams = [];
@@ -287,6 +306,32 @@ export class Effects {
     mesh.scale.set(s, s, s);
   }
 
+  /** Ground footprint for a directional strike or circular blast. */
+  telegraph(position, { radius, life, yaw = 0, circle = false, color = '#ff806b' }) {
+    const entry = this.telegraphs[this.telegraphCursor];
+    this.telegraphCursor = (this.telegraphCursor + 1) % this.telegraphs.length;
+    entry.serial += 1;
+    const serial = entry.serial;
+    entry.life = life;
+    entry.maxLife = life;
+    const mesh = entry.mesh;
+    mesh.geometry = circle ? DISC_GEO : SECTOR_GEO;
+    mesh.position.copy(position);
+    mesh.position.y += 0.09;
+    mesh.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
+      .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
+    mesh.scale.setScalar(radius);
+    mesh.material.color.set(color);
+    mesh.material.opacity = 0.18;
+    mesh.visible = true;
+    return () => {
+      if (entry.serial === serial) {
+        entry.life = 0;
+        mesh.visible = false;
+      }
+    };
+  }
+
   /**
    * A short-lived beam from A to B.
    * @param {THREE.Vector3} from
@@ -341,7 +386,7 @@ export class Effects {
     sprite.position.copy(position);
     sprite.position.x += (Math.random() - 0.5) * 0.6;
     sprite.position.y += 1.4;
-    const w = opts.crit ? 2.9 : 2.1;
+    const w = opts.crit ? 1.5 : 1.1;
     sprite.scale.set(w, opts.crit ? 1.45 : 1.05, 1);
     sprite.material.opacity = 1;
     sprite.visible = true;
@@ -432,6 +477,14 @@ export class Effects {
       if (entry.life <= 0) entry.mesh.visible = false;
     }
 
+    for (const entry of this.telegraphs) {
+      if (entry.life <= 0) continue;
+      entry.life -= dt;
+      const progress = 1 - Math.max(0, entry.life) / entry.maxLife;
+      entry.mesh.material.opacity = 0.16 + progress * 0.18;
+      if (entry.life <= 0) entry.mesh.visible = false;
+    }
+
     // Beams.
     for (const entry of this.beams) {
       if (entry.life <= 0) continue;
@@ -497,6 +550,11 @@ export class Effects {
     }
     for (const entry of this.rings) {
       entry.life = 0;
+      entry.mesh.visible = false;
+    }
+    for (const entry of this.telegraphs) {
+      entry.life = 0;
+      entry.serial += 1;
       entry.mesh.visible = false;
     }
     for (const entry of this.beams) {

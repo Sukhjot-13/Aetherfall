@@ -119,6 +119,23 @@ Let the player bind any unlocked spell to slots 1–0 instead of the fixed order
 ### 2026-10-26 — Photo/recording mode
 Free camera, HUD toggle, depth-of-field and a screenshot key.
 
+### 2026-11-03 — Wayfarer face in close-up — ✅ rebuilt
+The old Wayfarer used single-sphere eyes and a flat mouth, so close-ups looked
+bare. The 2026-11-03 rebuild added layered eyes (white/iris/pupil/catchlight),
+rosy cheeks, a smile, a jaw line and Brow lift on look-around. Remaining idea:
+a proper mouth shape (open smile teeth) and eyelid geometry, both currently
+only implied.
+
+### 2026-11-03 — Lantern Way reward tuning
+The side quest currently grants +10 max stamina at the final lantern. Consider
+a small health or mana bump split across lanterns 3/6/8 so the reward feels
+progressive instead of back-loaded.
+
+### 2026-11-03 — Veil hunt spawn placement
+The three staged stalkers sit at fixed camp offsets. A small ring of Veil
+remnant markers along the Lantern Way road would teach the side-quest path
+while serving the hunt.
+
 ## 🔴 Vulnerabilities
 
 ### 2026-10-26 — `window.aetherfall` exposes full game state

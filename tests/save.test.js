@@ -101,3 +101,9 @@ test('valid storage payload loads', async () => {
   assert.ok(live);
   assert.equal(live.quest.stage, STAGES.SHARDS);
 });
+
+test('a missing or unavailable storage cannot report a successful save', async () => {
+  const { writeSave } = await import('../src/core/saveState.js');
+  assert.equal(writeSave(makeSnapshot(), null), false);
+  assert.equal(writeSave(makeSnapshot(), { setItem() { throw new Error('blocked'); } }), false);
+});

@@ -147,8 +147,9 @@ export class CameraRig {
     const p = player?.position ?? this.target;
     const velocity = player?.velocity;
     const leadScale = Math.min(1.15, Math.max(0, (speed - 2.2) * 0.085));
-    const leadX = velocity && speed > 0.01 ? (velocity.x / speed) * leadScale : 0;
-    const leadZ = velocity && speed > 0.01 ? (velocity.z / speed) * leadScale : 0;
+    const velocityLength = velocity ? Math.hypot(velocity.x, velocity.z) : 0;
+    const leadX = velocityLength > 0.01 ? (velocity.x / velocityLength) * leadScale : 0;
+    const leadZ = velocityLength > 0.01 ? (velocity.z / velocityLength) * leadScale : 0;
 
     if (this.state.mode === CAMERA_MODES.FIRST) {
       const eye = firstPersonPosition(p, 1.66);
@@ -184,9 +185,11 @@ export class CameraRig {
     const safe = this._collide(this.target, this._desired);
     if (!this._initialised) this.position.copy(safe);
     else {
-      this.position.x = damp(this.position.x, safe.x, 18, dt);
-      this.position.y = damp(this.position.y, safe.y, 14, dt);
-      this.position.z = damp(this.position.z, safe.z, 18, dt);
+      // Heavy, springy damping: the camera settles with momentum instead
+      // of snapping to the orbit point on every input change.
+      this.position.x = damp(this.position.x, safe.x, 10, dt);
+      this.position.y = damp(this.position.y, safe.y, 8, dt);
+      this.position.z = damp(this.position.z, safe.z, 10, dt);
     }
     cam.position.copy(this.position);
     this._look.copy(this.target);
@@ -223,9 +226,10 @@ export class CameraRig {
     }
 
     // Prop colliders: push the camera to the near side of any blocking circle.
-    const colliders = this.world.colliders ?? [];
+    const colliders = this.world.queryColliders?.((pivot.x + desired.x) * 0.5, (pivot.z + desired.z) * 0.5, length * 0.5 + 1) ?? this.world.colliders ?? [];
     for (let i = 0; i < colliders.length; i++) {
       const c = colliders[i];
+      if (c.active === false) continue;
       const cx = c.x - pivot.x;
       const cz = c.z - pivot.z;
       const along = (cx * dx + cz * dz) / (length * length);

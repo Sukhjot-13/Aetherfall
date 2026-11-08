@@ -62,6 +62,7 @@ export class Input {
   constructor(canvas) {
     this.canvas = canvas;
     this.down = new Set();
+    this.downCodes = new Set();
     this.pressed = new Set();
     this.mouseDX = 0;
     this.mouseDY = 0;
@@ -75,16 +76,21 @@ export class Input {
     this._onKeyDown = (e) => {
       const action = KEY_ACTIONS[e.code];
       if (!action) return;
+      const target = e.target;
+      if (target?.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target?.tagName)) return;
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6'].includes(e.code)) {
         e.preventDefault();
       }
       if (e.repeat) return;
       if (!this.down.has(action)) this.pressed.add(action);
+      this.downCodes.add(e.code);
       this.down.add(action);
     };
     this._onKeyUp = (e) => {
       const action = KEY_ACTIONS[e.code];
-      if (action) this.down.delete(action);
+      if (!action) return;
+      this.downCodes.delete(e.code);
+      if (![...this.downCodes].some((code) => KEY_ACTIONS[code] === action)) this.down.delete(action);
     };
     this._onMouseMove = (e) => {
       if (!this.locked) return;
@@ -112,6 +118,7 @@ export class Input {
       this.locked = document.pointerLockElement === this.canvas;
       if (!this.locked) {
         this.down.clear();
+        this.downCodes.clear();
         this.leftDown = false;
       }
       this.onLockChange?.(this.locked);
@@ -119,6 +126,11 @@ export class Input {
     this._onClick = () => this.onCanvasClick?.();
     this._onBlur = () => {
       this.down.clear();
+      this.downCodes.clear();
+      this.pressed.clear();
+      this.mouseDX = 0;
+      this.mouseDY = 0;
+      this.wheel = 0;
       this.leftDown = false;
     };
 
@@ -173,7 +185,12 @@ export class Input {
     if (this.locked) return Promise.resolve();
     try {
       const result = this.canvas.requestPointerLock?.({ unadjustedMovement: true });
-      return result && typeof result.then === 'function' ? result.catch(() => this.canvas.requestPointerLock?.()) : Promise.resolve();
+      // Both requests can be rejected (for example without a user gesture or
+      // inside an embedded browser). Treat that as an unlocked cursor rather
+      // than leaving an unhandled promise rejection.
+      return result && typeof result.then === 'function'
+        ? result.catch(() => this.canvas.requestPointerLock?.()).catch(() => {})
+        : Promise.resolve();
     } catch {
       return Promise.resolve();
     }

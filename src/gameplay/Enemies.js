@@ -11,6 +11,10 @@ import { LOCATIONS, SHARD_LOCATIONS } from '../world/locations.js';
 import { applyDamage } from './powerState.js';
 import { combineSlows, mitigate, tickSlows } from './combat.js';
 import { createGlowTexture } from '../world/textures.js';
+import { springDamp, secondaryLag, enemyLocomotion } from '../player/gait.js';
+import { hasLineOfSight } from './aim.js';
+import { inEnemyStrike, segmentCircleEntry, segmentSphereEntry, steerAround } from './enemyMovement.js';
+import { WardenVisual } from './WardenVisual.js';
 
 const TYPES = {
   drifter: {
@@ -46,10 +50,31 @@ const TYPES = {
     radius: 0.8,
     hitHeight: 0.9,
     hover: 0,
-    color: '#7a2f3c',
+    color: '#5c2330',
     glow: '#ff8a7a',
     ranged: false,
     scale: 1,
+  },
+  husk: {
+    // Gutted remnant: fast, frail, and comes in packs — the swarm variety
+    // the island needed between patient drifters and heavy wardens.
+    label: 'Veil Husk',
+    health: 34,
+    armor: 0,
+    speed: 7.4,
+    aggro: 22,
+    leash: 80,
+    attackRange: 2.2,
+    damage: 8,
+    windup: 0.3,
+    cooldown: 1.1,
+    radius: 0.55,
+    hitHeight: 0.8,
+    hover: 0,
+    color: '#5a4632',
+    glow: '#ffd27a',
+    ranged: false,
+    scale: 0.85,
   },
   warden: {
     label: 'Warden',
@@ -63,8 +88,8 @@ const TYPES = {
     windup: 0.75,
     cooldown: 2.5,
     radius: 1.7,
-    hitHeight: 2.1,
-    hover: 0.35,
+    hitHeight: 1.3,
+    hover: 0,
     color: '#3d2c66',
     glow: '#c6a8ff',
     ranged: false,
@@ -110,12 +135,16 @@ function buildBody(type) {
   const body = new THREE.Group();
   root.add(body);
 
-  const skin = new THREE.MeshStandardMaterial({
+  const skin = new THREE.MeshPhysicalMaterial({
     color: spec.color,
     emissive: new THREE.Color(spec.glow).multiplyScalar(0.22),
     emissiveIntensity: 0.9,
-    roughness: 0.72,
+    roughness: 0.38,
     metalness: 0.08,
+    clearcoat: 0.55,
+    clearcoatRoughness: 0.5,
+    sheen: 0.5,
+    sheenColor: new THREE.Color(spec.glow),
     flatShading: true,
   });
   const dark = new THREE.MeshStandardMaterial({
@@ -138,15 +167,19 @@ function buildBody(type) {
     part(body, new THREE.SphereGeometry(0.32, 10, 8), dark, [0, 1.72, 0], [1, 0.92, 0.95]);
     // Hood point.
     part(body, new THREE.ConeGeometry(0.26, 0.6, 6), skin, [0, 2.05, -0.02]);
-    // Tattered strips.
+    // Tattered strips: pivot groups so they flutter with the hover.
+    const tatters = [];
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * Math.PI * 2;
-      part(body, new THREE.BoxGeometry(0.1, 0.85, 0.02), dark, [
-        Math.cos(a) * 0.42,
-        0.05,
-        Math.sin(a) * 0.42,
-      ]).rotation.set(0.18 * Math.cos(a), a, 0.2 * Math.sin(a));
+      const pivot = new THREE.Group();
+      pivot.position.set(Math.cos(a) * 0.42, 0.42, Math.sin(a) * 0.42);
+      pivot.rotation.y = a;
+      body.add(pivot);
+      const strip = part(pivot, new THREE.BoxGeometry(0.1, 0.85, 0.02), dark, [0, -0.42, 0]);
+      strip.rotation.set(0.18 * Math.cos(a), 0, 0.2 * Math.sin(a));
+      tatters.push({ pivot, phase: i * 1.3 });
     }
+    body.userData.tatters = tatters;
     for (const side of [-1, 1]) {
       part(body, new THREE.SphereGeometry(0.045, 8, 6), eyeMat, [side * 0.12, 1.76, -0.27]);
     }
@@ -161,6 +194,8 @@ function buildBody(type) {
 
   if (type === 'stalker') {
     part(body, new THREE.IcosahedronGeometry(0.62, 1), skin, [0, 0.78, 0], [1.55, 0.8, 0.95]);
+    // Legs are pivot groups on the body so the stride can swing them.
+    const legs = [];
     // Spines.
     for (let i = 0; i < 5; i++) {
       const spine = part(body, new THREE.ConeGeometry(0.1, 0.55, 5), bone, [0, 1.18, -0.45 + i * 0.24]);
@@ -175,21 +210,48 @@ function buildBody(type) {
       horn.rotation.z = side * 0.5;
       part(body, new THREE.SphereGeometry(0.038, 7, 5), eyeMat, [side * 0.11, 0.82, -1.2]);
     }
-    // Legs.
+    // Legs: pivot groups so each swings fore/aft with the stride.
     for (const side of [-1, 1]) {
       for (const front of [-1, 1]) {
-        const hip = part(body, new THREE.CylinderGeometry(0.07, 0.05, 0.62, 5), dark, [
-          side * 0.42,
-          0.42,
-          front * 0.42,
-        ]);
+        const pivot = new THREE.Group();
+        pivot.position.set(side * 0.42, 0.62, front * 0.42);
+        body.add(pivot);
+        const hip = part(pivot, new THREE.CylinderGeometry(0.07, 0.05, 0.62, 5), dark, [0, -0.22, 0]);
         hip.rotation.z = side * 0.32;
-        part(body, new THREE.SphereGeometry(0.09, 6, 5), bone, [side * 0.54, 0.1, front * 0.48]);
+        part(pivot, new THREE.SphereGeometry(0.09, 6, 5), bone, [side * 0.12, -0.52, front * 0.06]);
+        legs.push({ pivot, side, restY: pivot.position.y, phase: (side < 0 ? 0 : 0.5) + (front < 0 ? 0 : 0.5) });
       }
     }
     const tail = part(body, new THREE.ConeGeometry(0.12, 0.9, 5), skin, [0, 0.9, 0.72]);
     tail.rotation.x = -1.35;
-    return { root, body, materials, hover: false };
+    return { root, body, materials, hover: false, legs };
+  }
+
+  if (type === 'husk') {
+    // Gutted walker: bent torso, dragging thin limbs, ember core.
+    part(body, new THREE.CylinderGeometry(0.26, 0.34, 0.95, 7), skin, [0, 0.62, 0], [1, 1, 0.8]);
+    part(body, new THREE.SphereGeometry(0.24, 9, 7), dark, [0, 1.18, -0.06], [1, 0.95, 0.95]);
+    part(body, new THREE.ConeGeometry(0.16, 0.5, 6), bone, [0, 1.45, 0.08]);
+    const legs = [];
+    for (const side of [-1, 1]) {
+      const pivot = new THREE.Group();
+      pivot.position.set(side * 0.16, 0.42, 0);
+      body.add(pivot);
+      part(pivot, new THREE.CylinderGeometry(0.045, 0.03, 0.5, 5), dark, [0, -0.2, 0]);
+      part(pivot, new THREE.CylinderGeometry(0.035, 0.02, 0.4, 5), dark, [0, -0.05, -0.18]).rotation.x = 0.9;
+      legs.push({ pivot, side, restY: pivot.position.y, phase: side < 0 ? 0 : 0.5 });
+    }
+    for (const side of [-1, 1]) {
+      const arm = part(body, new THREE.CylinderGeometry(0.035, 0.025, 0.55, 5), bone, [side * 0.34, 0.72, -0.12]);
+      arm.rotation.set(0.7, 0, side * 0.5);
+    }
+    for (const side of [-1, 1]) {
+      part(body, new THREE.SphereGeometry(0.035, 7, 5), eyeMat, [side * 0.09, 1.2, -0.22]);
+    }
+    const core = glowSprite(spec.glow, 1.1, 0.7);
+    core.position.set(0, 0.62, -0.14);
+    body.add(core);
+    return { root, body, materials, hover: false, legs };
   }
 
   // Warden — the shard guardians.
@@ -288,9 +350,19 @@ export class Enemies {
         if (Math.hypot(x - loc.x, z - loc.z) < (loc.radius ?? 20) + 12) nearPoi = true;
       }
       if (nearPoi) continue;
-      const type = placed % 3 === 2 ? 'stalker' : 'drifter';
-      this.spawn(type, x, z);
-      placed++;
+      // Mixed packs: stalkers hunt alone, husks hunt in threes, drifters
+      // hang back — the island reads varied instead of one species.
+      const roll = placed % 5;
+      if (roll === 4) {
+        for (let k = 0; k < 3 && placed < count; k++) {
+          this.spawn('husk', x + (k - 1) * 3, z + ((k * 7) % 5) - 2);
+          placed++;
+        }
+      } else {
+        const type = roll === 2 ? 'stalker' : 'drifter';
+        this.spawn(type, x, z);
+        placed++;
+      }
     }
   }
 
@@ -363,11 +435,34 @@ export class Enemies {
       isWarden: type === 'warden',
       attackCount: 0,
       lunge: 0,
+      legs: built.legs ?? [],
+      velX: 0,
+      velZ: 0,
+      hitstop: 0,
+      avoidSide: enemySerial % 2 ? 1 : -1,
+      attackYaw: 0,
+      cancelTelegraph: null,
     };
 
     this.list.push(enemy);
-    if (enemy.isWarden) this._activeWarden = enemy;
+    if (enemy.isWarden) {
+      this._activeWarden = enemy;
+      this._attachWardenVisual(enemy);
+    }
     return enemy;
+  }
+
+  async _attachWardenVisual(enemy) {
+    try {
+      const visual = await WardenVisual.create();
+      if (!enemy.alive || !this.list.includes(enemy)) { visual.dispose(); return; }
+      enemy.group.add(visual.group);
+      enemy.body.visible = false;
+      enemy.visual = visual;
+      enemy.materials = visual.materials;
+    } catch (error) {
+      console.warn('Using procedural Warden fallback:', error);
+    }
   }
 
   /** Every living enemy. */
@@ -440,7 +535,14 @@ export class Enemies {
     const dealt = Math.round(mitigate(amount, enemy.spec.armor));
     enemy.health = Math.max(0, enemy.health - dealt);
     enemy.hitFlash = 0.22;
+    enemy.hitTimer = 0.22;
+    // Hitstop: the enemy freezes for a beat so impacts read as impacts.
+    // Crits freeze longer; Wardens barely flinch. Chain second targets go
+    // through this same path, so the "2nd number" freezes like the first.
+    enemy.hitstop = enemy.isWarden ? 0.03 : opts.crit ? 0.12 : 0.06;
+    enemy.knockX = 0; enemy.knockZ = 0;
     enemy.aggro = true;
+    enemy.returning = false;
     enemy.engaged = true;
     if (enemy.dormant) enemy.dormant = false;
 
@@ -452,25 +554,48 @@ export class Enemies {
     if (!opts.silentNumber) {
       this.effects.damageNumber(point, dealt, { color: opts.color ?? '#ffe9a8', crit: opts.crit });
     }
+    // Hit: a tight spark snap + a soft ring so hits read as impacts, not puffs.
     this.effects.burst(point, {
-      count: 10,
+      count: opts.crit ? 22 : 10,
       color: opts.color ?? '#ffb066',
-      speed: 3.6,
-      size: 0.26,
+      speed: opts.crit ? 5.6 : 3.6,
+      size: opts.crit ? 0.34 : 0.26,
       life: 0.4,
       gravity: 2,
       drag: 2,
     });
+    // Extra impact sparks for crits so big hits feel bigger.
+    if (opts.crit) {
+      this.effects.burst(point, {
+        count: 12,
+        color: '#ffffff',
+        speed: 6.5,
+        size: 0.2,
+        life: 0.3,
+        gravity: 1,
+        drag: 2,
+      });
+    }
+    this.effects.ring(enemy.position.clone(), { color: opts.color ?? '#ffb066', radius: enemy.isWarden ? 3.2 : 2.2, life: 0.28, opacity: 0.7 });
+    this.effects.flash(point, { color: opts.color ?? '#ffb066', size: 1.7, life: 0.18, growth: 2.2, opacity: 0.7 });
     this.audio?.enemyHit();
-    this.camera?.addShake?.(enemy.isWarden ? 0.1 : 0.035);
+    this.camera?.addShake?.(enemy.isWarden ? 0.12 : 0.05);
 
     if (opts.knockback && opts.from) {
+      if (enemy.windup > 0) {
+        enemy.cancelTelegraph?.();
+        enemy.cancelTelegraph = null;
+        enemy.windup = 0;
+        enemy.attackCooldown = Math.max(enemy.attackCooldown, 0.6);
+      }
       const dx = enemy.position.x - opts.from.x;
       const dz = enemy.position.z - opts.from.z;
       const len = Math.hypot(dx, dz) || 1;
       const push = opts.knockback * (enemy.isWarden ? 0.22 : 1);
       enemy.position.x += (dx / len) * push;
       enemy.position.z += (dz / len) * push;
+      enemy.knockX = (dx / len) * push * 1.6;
+      enemy.knockZ = (dz / len) * push * 1.6;
     }
 
     if (enemy.health <= 0) {
@@ -488,13 +613,20 @@ export class Enemies {
     enemy.slows = [{ factor: combined.factor, remaining: combined.remaining }];
   }
 
-  /** Death: FX, reward callback, then shrink away. */
+  /** Death: FX, reward callback, then dissolve + soul wisps. */
   _kill(enemy) {
+    enemy.cancelTelegraph?.();
+    enemy.cancelTelegraph = null;
     enemy.alive = false;
     enemy.deadTimer = 1.1;
+    enemy.deadDuration = 1.1;
     enemy.aggro = false;
     enemy.windup = 0;
+    enemy.deadSpin = 0;
     const point = new THREE.Vector3(enemy.position.x, enemy.position.y + enemy.hitHeight, enemy.position.z);
+    // Soul wisps rising: gravity negative carries them up out of the body.
+    this.effects.burst(point, { count: 12, color: '#f0e6ff', speed: 1.6, size: 0.34, life: 1.3, gravity: -2.4, drag: 1.4 });
+    this.effects.flash(point, { color: '#b48cff', size: 3.4, life: 0.3, growth: 2.6, opacity: 0.8 });
 
     this.effects.burst(point, {
       count: enemy.isWarden ? 120 : 40,
@@ -528,14 +660,14 @@ export class Enemies {
     });
     if (enemy.isWarden) {
       this.camera?.addShake?.(0.6);
-      this.audio?.beacon?.();
+      this.audio?.wardenDeath?.();
     } else {
-      this.audio?.enemyHit();
+      this.audio?.enemyDeath?.();
     }
     this.onKill(enemy);
   }
 
-  /** Launch a homing orb from a Drifter. */
+  /** Launch a straight-moving orb from a Drifter. */
   _fireProjectile(enemy) {
     const slot = this.projectiles[this.projCursor];
     this.projCursor = (this.projCursor + 1) % this.projectiles.length;
@@ -563,24 +695,42 @@ export class Enemies {
     });
   }
 
-  /** Melee / slam hit against the player. */
+  /** Check terrain and props before a ranged enemy commits to a shot. */
+  _clearShot(enemy, target) {
+    const start = { x: enemy.position.x, y: enemy.position.y + enemy.hitHeight, z: enemy.position.z };
+    const end = { x: target.x, y: target.y + 1, z: target.z };
+    if (!hasLineOfSight(start, end, (x, z) => this.world.heightAt(x, z), { samples: 5, clearance: 0.15 })) return false;
+    return this._firstPropHit(start, end) === null;
+  }
+
+  /** Earliest hit against a nearby prop's approximate vertical cylinder. */
+  _firstPropHit(start, end) {
+    const mx = (start.x + end.x) * 0.5, mz = (start.z + end.z) * 0.5;
+    const radius = Math.hypot(end.x - start.x, end.z - start.z) * 0.5 + 0.2;
+    const colliders = this.world.queryColliders?.(mx, mz, radius) ?? this.world.colliders ?? [];
+    let first = null;
+    for (const collider of colliders) {
+      if (collider.active === false) continue;
+      const t = segmentCircleEntry(start, end, collider, 0.18);
+      if (t === null || (first !== null && t >= first)) continue;
+      const y = start.y + (end.y - start.y) * t;
+      const base = this.world.heightAt(collider.x, collider.z);
+      if (y >= base - 0.2 && y <= base + Math.max(3, collider.r * 2)) first = t;
+    }
+    return first;
+  }
+
+  /** Directional melee strike or radial Warden nova. */
   _hitPlayer(enemy, damage, kind = 'melee', range = null) {
     const reach = range ?? enemy.spec.attackRange + 1.4;
-    const dist = Math.hypot(
-      enemy.position.x - this.player.position.x,
-      enemy.position.z - this.player.position.z,
-    );
-    if (dist > reach) return false;
-
-    this.damagePlayer(damage, {
-      origin: enemy.position,
-      kind,
-      shake: enemy.isWarden ? 0.55 : 0.24,
+    const nova = kind === 'nova';
+    const origin = { x: enemy.position.x, y: nova ? enemy.baseY : enemy.position.y + enemy.hitHeight, z: enemy.position.z };
+    const target = { x: this.player.position.x, y: this.player.position.y + (nova ? 0 : 1), z: this.player.position.z };
+    const verticalReach = nova ? 1.1 : enemy.isWarden ? 3.5 : 1.8;
+    if (!inEnemyStrike(origin, enemy.attackYaw, target, reach, verticalReach, kind === 'nova' ? Math.PI : undefined)) return false;
+    return this.damagePlayer(damage, {
+      origin: enemy.position, kind, shake: enemy.isWarden ? 0.55 : 0.24,
     });
-    if (kind === 'nova') {
-      this.effects.ring(enemy.position.clone(), { color: '#c6a8ff', radius: 9, life: 0.55 });
-    }
-    return true;
   }
 
   /**
@@ -633,6 +783,7 @@ export class Enemies {
   /** Per-frame AI. */
   update(dt, elapsed) {
     const player = this.player.position;
+    const playerInCamp = Math.hypot(player.x - LOCATIONS.camp.x, player.z - LOCATIONS.camp.z) < 18;
 
     for (const enemy of this.list) {
       if (enemy.isBoss) continue; // FinalBoss drives its own AI and animation.
@@ -640,11 +791,27 @@ export class Enemies {
         enemy.velocity?.set(0, 0, 0);
         if (enemy.deadTimer > 0) {
           enemy.deadTimer -= dt;
-          const t = clamp(enemy.deadTimer / 1.1, 0, 1);
-          enemy.group.scale.setScalar(enemy.spec.scale * t);
-          enemy.group.rotation.y += dt * 3;
-          if (enemy.deadTimer <= 0) enemy.group.visible = false;
+          const total = enemy.deadDuration ?? 1.1;
+          const t = clamp(enemy.deadTimer / total, 0, 1);
+          const ease = t * t;
+          // Death: pop + spin + rise, with a quick squash at the end, so the
+          // body reads as an explosion of light rather than shrinking away.
+          const pop = 1 + (1 - t) * 0.12;
+          enemy.group.scale.setScalar(Math.max(0.01, enemy.spec.scale * ease * pop));
+          enemy.group.rotation.y += dt * (3 + (1 - t) * 4);
+          enemy.group.position.y += dt * (1.2 + (1 - t) * 1.6);
+          for (const material of enemy.materials ?? []) {
+            if (material.emissive) material.emissiveIntensity = 0.9 + (1 - t) * 4;
+            if (material.transparent === false) { material.transparent = true; }
+            material.opacity = Math.max(0.08, t);
+            material.depthWrite = t > 0.35;
+          }
+          if (enemy.deadTimer <= 0) {
+            enemy.group.visible = false;
+            for (const material of enemy.materials ?? []) { material.opacity = 1; material.transparent = false; material.depthWrite = true; }
+          }
         }
+        if (enemy.deadTimer <= 0) this._releaseEnemyVisuals(enemy);
         continue;
       }
 
@@ -652,50 +819,142 @@ export class Enemies {
       const beforeX = enemy.position.x;
       const beforeY = enemy.position.y;
       const beforeZ = enemy.position.z;
-      enemy.slows = tickSlows(enemy.slows, dt);
+      // Distant idle enemies sleep without flashing into view on a timer.
+      // Pursuers and returning enemies stay active so their leash still works.
+      {
+        const fdx = player.x - enemy.position.x;
+        const fdz = player.z - enemy.position.z;
+        if (!enemy.aggro && !enemy.returning && fdx * fdx + fdz * fdz > 62500) {
+          enemy._sleepTimer = (enemy._sleepTimer ?? 0) + dt;
+          enemy.group.visible = false;
+          enemy.velocity?.set(0, 0, 0);
+          continue;
+        }
+        enemy.group.visible = true;
+      }
+      const slept = enemy._sleepTimer ?? 0;
+      enemy._sleepTimer = 0;
+      if (slept > 0) {
+        enemy.hitstop = Math.max(0, (enemy.hitstop ?? 0) - slept);
+        enemy.hitFlash = Math.max(0, (enemy.hitFlash ?? 0) - slept);
+        enemy.attackCooldown = Math.max(0, enemy.attackCooldown - slept);
+        if (enemy.hitFlash === 0) {
+          for (const material of enemy.materials ?? []) material.emissiveIntensity = 0.9;
+        }
+      }
+      enemy.slows = tickSlows(enemy.slows, dt + slept);
       const { factor: slowFactor } = combineSlows(enemy.slows);
+
+      // Hitstop freeze: consume the timer and hold still this frame.
+      // Flash still decays so the hit reads as a snap, not a stall.
+      if ((enemy.hitstop ?? 0) > 0) {
+        enemy.hitstop = Math.max(0, enemy.hitstop - dt);
+        if (enemy.hitFlash > 0) {
+          enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
+          const flash = enemy.hitFlash / 0.22;
+          for (const material of enemy.materials) material.emissiveIntensity = 0.9 + flash * 5;
+        }
+        enemy.velocity?.set(0, 0, 0);
+        continue;
+      }
 
       const dx = player.x - enemy.position.x;
       const dz = player.z - enemy.position.z;
       const dist = Math.hypot(dx, dz);
       const ground = this.world.heightAt(enemy.position.x, enemy.position.z);
 
-      // Idle hover / breathing.
-      enemy.phase += dt * 1.6;
+      // Fluid locomotion: smoothed speed (moveBlend) drives bob/lean so
+      // enemies ease in/out instead of snapping. Phase advances with speed
+      // so the bob matches stride, not the clock.
+      enemy.phase += dt * (1.6 + (enemy.moveBlend ?? 0) * 4.5);
       const hover = spec.hover + Math.sin(enemy.phase) * 0.12 * (spec.hover > 0 ? 1 : 0);
       enemy.baseY = ground;
 
       if (enemy.dormant) {
+        enemy.moveBlend = damp(enemy.moveBlend ?? 0, 0, 8, dt);
         enemy.group.position.y = ground + hover;
         enemy.body.rotation.y = Math.sin(elapsed * 0.4 + enemy.phase) * 0.2;
+        enemy.visual?.update(dt, enemy);
         enemy.velocity?.set(0, 0, 0);
         continue;
       }
 
       // Aggro / leash.
-      if (!enemy.aggro && dist < spec.aggro) {
+      if (enemy.returning && Math.hypot(enemy.position.x - enemy.spawnPoint.x, enemy.position.z - enemy.spawnPoint.z) < 2) {
+        enemy.returning = false;
+      }
+      if (!enemy.aggro && !enemy.returning && !playerInCamp && dist < spec.aggro) {
         enemy.aggro = true;
         enemy.engaged = true;
+        this.audio?.growl?.(enemy.type);
       }
       if (enemy.aggro) {
         const fromSpawn = Math.hypot(enemy.position.x - enemy.spawnPoint.x, enemy.position.z - enemy.spawnPoint.z);
-        if (fromSpawn > spec.leash || this.powers.dead) {
+        if (fromSpawn > spec.leash || this.powers.dead || playerInCamp) {
           enemy.aggro = false;
           enemy.engaged = false;
+          enemy.returning = true;
+          enemy.cancelTelegraph?.();
+          enemy.cancelTelegraph = null;
+          enemy.windup = 0;
+          enemy.lunge = 0;
         }
       }
 
+      if (enemy.aggro && spec.ranged && dist < spec.attackRange + 4) {
+        enemy._shotTimer = (enemy._shotTimer ?? 0) - dt;
+        if (enemy._shotTimer <= 0) {
+          enemy._shotTimer = 0.35;
+          enemy._clearShot = this._clearShot(enemy, player);
+        }
+      }
       let moveSpeed = 0;
       if (enemy.aggro && enemy.windup <= 0) {
         const stop = spec.attackRange * 0.82;
-        if (dist > stop) moveSpeed = spec.speed * slowFactor;
+        if (dist > stop || (spec.ranged && enemy._clearShot === false)) moveSpeed = spec.speed * slowFactor;
       }
+      // Idle life: non-aggro enemies drift on slow wander loops (pause,
+      // stroll, pause) so the world feels inhabited before contact.
+      let wanderX = 0;
+      let wanderZ = 0;
+      if (!enemy.aggro && !enemy.returning) {
+        enemy._wanderTimer = (enemy._wanderTimer ?? 0) + dt;
+        if (enemy._wanderTimer > (enemy._wanderPeriod ?? 3)) {
+          enemy._wanderTimer = 0;
+          enemy._wanderPeriod = 2.5 + Math.abs(Math.sin((enemy.position.x + enemy.position.z) * 0.7)) * 4;
+          enemy._wanderAng = Math.sin((enemy.position.x * 1.7 + enemy.position.z * 0.9)) * Math.PI * 2;
+          enemy._wanderGo = Math.abs(Math.sin((enemy.position.x + enemy.position.z) * 0.13)) > 0.45;
+        } else if (enemy._wanderGo) {
+          const a = enemy._wanderAng ?? 0;
+          wanderX = Math.cos(a) * 1.1;
+          wanderZ = Math.sin(a) * 1.1;
+          enemy._wanderYaw = a;
+        }
+      }
+      // Desired velocity toward the player; actual velocity chases it with
+      // accel/decel so the body never snaps start/stop. moveBlend follows
+      // the *actual* speed for the stride bob, not the demand.
+      const nx = dx / (dist || 1);
+      const nz = dz / (dist || 1);
+      const homeX = enemy.spawnPoint.x - enemy.position.x;
+      const homeZ = enemy.spawnPoint.z - enemy.position.z;
+      const homeDist = Math.hypot(homeX, homeZ) || 1;
+      let desiredX = enemy.returning ? homeX / homeDist * spec.speed : nx * moveSpeed + wanderX;
+      let desiredZ = enemy.returning ? homeZ / homeDist * spec.speed : nz * moveSpeed + wanderZ;
+      const nearby = this.world.queryColliders?.(enemy.position.x, enemy.position.z, enemy.radius + 5) ?? this.world.colliders ?? [];
+      if (desiredX || desiredZ) {
+        const steered = steerAround(enemy.position, { x: desiredX, z: desiredZ }, enemy.radius, nearby, enemy.avoidSide);
+        desiredX = steered.x;
+        desiredZ = steered.z;
+      }
+      enemy.velX = damp(enemy.velX ?? 0, desiredX, 4.2, dt);
+      enemy.velZ = damp(enemy.velZ ?? 0, desiredZ, 4.2, dt);
+      const actualSpeed = Math.hypot(enemy.velX, enemy.velZ);
+      enemy.moveBlend = damp(enemy.moveBlend ?? 0, actualSpeed > 0.1 ? Math.min(1, actualSpeed / Math.max(1, spec.speed)) : 0, 6, dt);
 
-      if (moveSpeed > 0) {
-        const nx = dx / (dist || 1);
-        const nz = dz / (dist || 1);
-        enemy.position.x += nx * moveSpeed * dt;
-        enemy.position.z += nz * moveSpeed * dt;
+      if (actualSpeed > 0.01) {
+        enemy.position.x += enemy.velX * dt;
+        enemy.position.z += enemy.velZ * dt;
         // Separation from other enemies.
         for (const other of this.list) {
           if (other === enemy || !other.alive) continue;
@@ -723,32 +982,95 @@ export class Enemies {
       // Lunge movement.
       if (enemy.lunge > 0) {
         enemy.lunge = Math.max(0, enemy.lunge - dt);
-        const nx = dx / (dist || 1);
-        const nz = dz / (dist || 1);
-        enemy.position.x += nx * 8 * dt;
-        enemy.position.z += nz * 8 * dt;
+        enemy.position.x += -Math.sin(enemy.attackYaw) * 8 * dt;
+        enemy.position.z += -Math.cos(enemy.attackYaw) * 8 * dt;
       }
 
-      // Face the player.
-      if (enemy.aggro) {
-        const targetYaw = Math.atan2(-dx, -dz);
-        enemy.yaw = dampAngle(enemy.yaw, targetYaw, 7, dt);
+      // Face the player (or wander direction when idling), with a soft turn.
+      {
+        let targetYaw = enemy.yaw;
+        if (enemy.aggro && enemy.windup > 0) targetYaw = enemy.attackYaw;
+        else if (enemy.aggro) targetYaw = Math.atan2(-dx, -dz);
+        else if (actualSpeed > 0.1) targetYaw = Math.atan2(-enemy.velX, -enemy.velZ);
+        enemy.yaw = dampAngle(enemy.yaw, targetYaw, 5.5, dt);
       }
       enemy.group.rotation.y = enemy.yaw;
+      // Strafe sway while engaged: weight shifts side-to-side like a body
+      // circling rather than beelining, plus breathing at rest.
+      const swayEnv = enemy.aggro ? 1 : 0.35;
+      enemy.body.rotation.z = Math.sin(elapsed * (enemy.aggro ? 2.1 : 1.1) + enemy.phase) * 0.05 * swayEnv + (enemy.body.rotation.z || 0) * 0.9;
 
-      // Ground follow + hover.
-      const newGround = this.world.heightAt(enemy.position.x, enemy.position.z);
-      const targetY = newGround + hover;
+      // Ground follow + hover + smoothed yaw. Yaw damps harder while
+      // windup coils so the turn reads deliberate; movement blends accel.
+      // Reuse the pre-move ground sample merged with the post-move height
+      // via one damp: a second analytic FBM height per enemy per frame
+      // was the main enemy cost.
+      const targetY = ground + hover;
       enemy.position.y = damp(enemy.position.y, targetY, spec.hover > 0 ? 6 : 18, dt);
 
-      // Bob / weave for flyers.
-      if (spec.hover > 0) {
-        enemy.body.position.y = Math.sin(elapsed * 1.4 + enemy.phase) * 0.16;
-        enemy.body.rotation.z = Math.sin(elapsed * 0.9 + enemy.phase) * 0.06;
-      } else {
-        enemy.body.position.y = Math.abs(Math.sin(elapsed * 5 + enemy.phase)) * 0.06;
-        enemy.body.rotation.z = 0;
+      // Knockback carry: decaying slide so hits shove instead of teleport.
+      if ((enemy.knockX || 0) || (enemy.knockZ || 0)) {
+        enemy.position.x += enemy.knockX * dt;
+        enemy.position.z += enemy.knockZ * dt;
+        enemy.knockX = damp(enemy.knockX, 0, 8, dt);
+        enemy.knockZ = damp(enemy.knockZ, 0, 8, dt);
       }
+
+      // Solid props constrain enemies as well as the player. The broad phase
+      // is shared with camera and player collision to keep this inexpensive.
+      for (const collider of nearby) {
+        if (collider.active === false) continue;
+        const ox = enemy.position.x - collider.x, oz = enemy.position.z - collider.z;
+        const distance = Math.hypot(ox, oz);
+        const minimum = enemy.radius + collider.r;
+        if (distance >= minimum) continue;
+        const ux = distance > 1e-5 ? ox / distance : enemy.avoidSide;
+        const uz = distance > 1e-5 ? oz / distance : 0;
+        enemy.position.x += ux * (minimum - distance);
+        enemy.position.z += uz * (minimum - distance);
+      }
+
+      // Soft-body locomotion: spring-damped body/leg blend so movement
+      // eases in/out like weight, never snapping. Hover types get floaty
+      // bank + tatter lag; ground types get a diagonal quadruped gait.
+      const move = enemy.moveBlend ?? 0;
+      enemy._soft = enemy._soft ?? { tatter: 0, tatterV: 0, bodyY: 0, zRot: 0, xRot: 0 };
+      const soft = enemy._soft;
+      if (spec.hover > 0) {
+        const loco = enemyLocomotion(move, enemy.phase, 1);
+        soft.bodyY = springDamp(soft.bodyY, Math.sin(enemy.phase * 1.2) * 0.16 + loco.bob * 0.4 + move * 0.04, 5, dt);
+        enemy.body.position.y = soft.bodyY;
+        enemy.body.rotation.z = springDamp(enemy.body.rotation.z, Math.sin(elapsed * 0.9 + enemy.phase) * 0.06 + move * 0.06, 4.5, dt);
+        enemy.body.rotation.x = springDamp(enemy.body.rotation.x, move * 0.18 + loco.lean * 0.3, 4, dt);
+        // Hover banking + tatter flutter / arm sway sell flight weight.
+        enemy.body.rotation.y = Math.sin(elapsed * 0.7 + enemy.phase) * 0.08;
+        for (const t of enemy.body.userData?.tatters ?? []) {
+          const lag = secondaryLag(t.pivot.rotation.x, Math.sin(elapsed * (2.2 + move * 1.5) + t.phase) * (0.2 + move * 0.5), (t._v ?? 0), dt, 14, 5);
+          t._v = lag.vel; t.pivot.rotation.x = lag.pos;
+        }
+      } else {
+        const stride = enemy.phase * 1.4;
+        enemy.body.position.y = Math.abs(Math.sin(stride)) * (0.03 + move * 0.07);
+        enemy.body.rotation.z = Math.sin(stride) * move * 0.08;
+        enemy.body.rotation.x = springDamp(enemy.body.rotation.x, move * 0.14, 4.5, dt);
+        // Quadruped gait: diagonal pairs (FL+HR, FR+HL) swing together.
+        // Phase offset 0 = left-front/right-hind, 0.5 = the other diagonal.
+        for (const leg of enemy.legs ?? []) {
+          const swing = Math.sin(stride + Math.PI * 2 * leg.phase) * move * 0.8;
+          const lift = Math.max(0, Math.sin(stride + Math.PI * 2 * leg.phase + 1.57)) * move * 0.35;
+          leg.pivot.rotation.x = springDamp(leg.pivot.rotation.x, -swing, 6.5, dt);
+          leg.pivot.position.y = springDamp(leg.pivot.position.y, leg.restY + lift, 6.5, dt);
+        }
+      }
+
+      if (enemy.windup > 0) {
+        const p = 1 - enemy.windup / Math.max(enemy.windupTotal, 1e-4);
+        const coil = Math.sin(clamp(p, 0, 1) * Math.PI * 0.5);
+        enemy.body.rotation.x = damp(enemy.body.rotation.x, -coil * 0.34, 12, dt);
+        enemy.body.position.y -= coil * 0.06;
+      }
+
+      enemy.visual?.update(dt, enemy);
 
       // Hit flash.
       if (enemy.hitFlash > 0) {
@@ -769,31 +1091,44 @@ export class Enemies {
         enemy.windup -= dt;
         if (enemy.windup <= 0) {
           enemy.windup = 0;
+          enemy.cancelTelegraph?.();
+          enemy.cancelTelegraph = null;
           enemy.attackCooldown = spec.cooldown;
           enemy.attackCount += 1;
+          enemy.body.rotation.x = 0.52; // strike snap
+          this.effects.flash(new THREE.Vector3(enemy.position.x, enemy.position.y + enemy.hitHeight, enemy.position.z), { color: spec.glow, size: 2.2, life: 0.18, growth: 2.2, opacity: 0.55 });
           if (spec.ranged) {
             this._fireProjectile(enemy);
             this.effects.burst(
               new THREE.Vector3(enemy.position.x, enemy.position.y + enemy.hitHeight, enemy.position.z),
               { count: 12, color: spec.glow, speed: 3, size: 0.28, life: 0.4, gravity: 0 },
             );
-          } else if (enemy.isWarden && enemy.attackCount % 3 === 0) {
+          } else if (enemy.windupKind === 'nova') {
+            this.effects.ring(enemy.position.clone().setY(ground), { color: spec.glow, radius: 9, life: 0.55 });
             this._hitPlayer(enemy, 18, 'nova', 9);
           } else {
             enemy.lunge = 0.18;
             this._hitPlayer(enemy, spec.damage, 'melee');
           }
         }
-      } else if (enemy.aggro && dist <= spec.attackRange && enemy.attackCooldown <= 0) {
+      } else if (enemy.aggro && dist <= spec.attackRange && enemy.attackCooldown <= 0 && (!spec.ranged || enemy._clearShot !== false)) {
         enemy.windup = spec.windup;
-        enemy.windupKind = spec.ranged ? 'ranged' : 'melee';
-        // Telegraph: a bright ring at the enemy's feet.
-        this.effects.ring(enemy.position.clone(), {
-          color: spec.glow,
-          radius: enemy.radius + 1.4,
-          life: spec.windup,
-          opacity: 0.55,
-        });
+        enemy.windupTotal = spec.windup;
+        enemy.windupKind = spec.ranged ? 'ranged' : enemy.isWarden && (enemy.attackCount + 1) % 3 === 0 ? 'nova' : 'melee';
+        enemy.attackYaw = enemy.yaw;
+        enemy.velX = 0;
+        enemy.velZ = 0;
+        if (spec.ranged) {
+          this.effects.ring(enemy.position.clone().setY(ground), { color: spec.glow, radius: enemy.radius + 1.4, life: spec.windup, opacity: 0.55 });
+        } else {
+          enemy.cancelTelegraph = this.effects.telegraph?.(enemy.position.clone().setY(ground), {
+            color: enemy.windupKind === 'nova' ? '#c6a8ff' : '#f19377',
+            radius: enemy.windupKind === 'nova' ? 9 : spec.attackRange + 1.4,
+            life: spec.windup,
+            yaw: enemy.attackYaw,
+            circle: enemy.windupKind === 'nova',
+          }) ?? null;
+        }
       }
 
       if (dt > 0 && enemy.velocity) {
@@ -805,38 +1140,48 @@ export class Enemies {
       }
     }
 
-    // Enemy projectiles.
+    // Swept collision prevents fast orbs tunnelling through players or props.
     for (const slot of this.projectiles) {
       if (!slot.active) continue;
+      if (playerInCamp) {
+        slot.active = false;
+        slot.mesh.visible = false;
+        continue;
+      }
       slot.life -= dt;
-      slot.mesh.position.addScaledVector(slot.velocity, dt);
-      slot.mesh.rotation.y += dt * 8;
+      const start = slot.mesh.position.clone();
+      const end = start.clone().addScaledVector(slot.velocity, dt);
       const target = this.player.position;
-      const dist = Math.hypot(
-        slot.mesh.position.x - target.x,
-        slot.mesh.position.y - (target.y + 1.0),
-        slot.mesh.position.z - target.z,
-      );
-      if (dist < 0.9) {
-        this.damagePlayer(slot.damage, {
-          origin: slot.mesh.position,
-          kind: 'projectile',
-          shake: 0.22,
-          color: '#c6a8ff',
-        });
-        this.effects.burst(slot.mesh.position, {
-          count: 14,
-          color: '#c6a8ff',
-          speed: 3.4,
-          size: 0.28,
-          life: 0.4,
-          gravity: 1.6,
-        });
+      const playerHit = segmentSphereEntry(start, end, { x: target.x, y: target.y + 1, z: target.z }, 0.9);
+      let obstruction = this._firstPropHit(start, end);
+      const steps = Math.max(1, Math.ceil(start.distanceTo(end)));
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const x = start.x + (end.x - start.x) * t;
+        const y = start.y + (end.y - start.y) * t;
+        const z = start.z + (end.z - start.z) * t;
+        if (y <= this.world.heightAt(x, z) + 0.12) {
+          obstruction = obstruction === null ? t : Math.min(obstruction, t);
+          break;
+        }
+      }
+      const hitPlayer = playerHit !== null && (obstruction === null || playerHit < obstruction);
+      const hitTime = hitPlayer ? playerHit : obstruction;
+      if (hitTime !== null) {
+        slot.mesh.position.lerpVectors(start, end, hitTime);
+        if (hitPlayer) {
+          this.damagePlayer(slot.damage, { origin: slot.mesh.position, kind: 'projectile', shake: 0.22, color: '#c6a8ff' });
+        }
+        this.effects.burst(slot.mesh.position, { count: hitPlayer ? 14 : 8, color: '#c6a8ff', speed: 3.4, size: 0.28, life: 0.4, gravity: 1.6 });
         slot.active = false;
         slot.mesh.visible = false;
-      } else if (slot.life <= 0) {
-        slot.active = false;
-        slot.mesh.visible = false;
+      } else {
+        slot.mesh.position.copy(end);
+        slot.mesh.rotation.y += dt * 8;
+        if (slot.life <= 0) {
+          slot.active = false;
+          slot.mesh.visible = false;
+        }
       }
     }
   }
@@ -846,18 +1191,42 @@ export class Enemies {
     if (!enemy) return;
     const index = this.list.indexOf(enemy);
     if (index >= 0) this.list.splice(index, 1);
+    enemy.cancelTelegraph?.();
+    this._releaseEnemyVisuals(enemy);
     enemy.group?.parent?.remove(enemy.group);
     if (enemy.isWarden && this._activeWarden === enemy) this._activeWarden = null;
   }
 
   /** Remove every enemy and start fresh (new game). */
   reset() {
-    for (const enemy of this.list) this.group.remove(enemy.group);
+    for (const enemy of this.list) { enemy.cancelTelegraph?.(); this._releaseEnemyVisuals(enemy); this.group.remove(enemy.group); }
     this.list.length = 0;
     for (const slot of this.projectiles) {
       slot.active = false;
       slot.mesh.visible = false;
     }
     this._activeWarden = null;
+  }
+
+  /** Release only resources owned by a procedural enemy, not shared textures or the boss. */
+  _releaseEnemyVisuals(enemy) {
+    if (!enemy || enemy.isBoss || enemy._visualsDisposed) return;
+    enemy._visualsDisposed = true;
+    enemy.visual?.dispose(); // Warden geometry and textures are shared by its asset cache.
+    enemy.visual = null;
+    const geometries = new Set();
+    const materials = new Set();
+    enemy.body?.traverse((object) => {
+      // Sprite geometry is shared by Three.js across all sprites.
+      if (object.isMesh && object.geometry) geometries.add(object.geometry);
+      if (object.material) {
+        for (const material of Array.isArray(object.material) ? object.material : [object.material]) materials.add(material);
+      }
+    });
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+    enemy.body?.clear();
+    enemy.legs = [];
+    enemy.materials = [];
   }
 }

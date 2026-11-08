@@ -304,6 +304,229 @@ export function createHealthBar(opts = {}) {
   };
 }
 
+/**
+ * Procedural bark: vertical furrows with moss speckle. Tiles vertically for
+ * trunk wraps. Warm brown-grey, not flat tan.
+ */
+export function createBarkTexture(size = 256) {
+  const { canvas, ctx } = canvas2d(size, size);
+  const image = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x / size) * 8;
+      const v = (y / size) * 2;
+      const furrow = fbm2(u, v, 4, 17) * 0.5 + 0.5;
+      const ridge = Math.pow(Math.abs(Math.sin(u * Math.PI + fbm2(u * 0.7, v, 2, 23))), 1.6);
+      const n = valueNoise2(x * 0.08, y * 0.08, 31) * 0.5 + 0.5;
+      let r = 78 + furrow * 44 - ridge * 30 + n * 18;
+      let g = 60 + furrow * 30 - ridge * 20 + n * 14;
+      let b = 42 + furrow * 20 - ridge * 12 + n * 10;
+      const moss = (fbm2(u * 0.6 + 9, v * 0.6, 3, 41) > 0.62) ? 22 : 0;
+      g += moss;
+      r = Math.max(0, Math.min(255, r));
+      g = Math.max(0, Math.min(255, g));
+      b = Math.max(0, Math.min(255, b));
+      const i = (y * size + x) * 4;
+      image.data[i] = r;
+      image.data[i + 1] = g;
+      image.data[i + 2] = b;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(2, 2);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+/**
+ * Pine needle mass: a drooping branch with dense needles, transparent
+ * background for alpha-tested cards. Two layered tiers of needles give
+ * depth; centre twig anchors the silhouette.
+ */
+export function createNeedleTexture() {
+  const W = 256;
+  const H = 192;
+  const { canvas, ctx } = canvas2d(W, H);
+  ctx.clearRect(0, 0, W, H);
+  // Twig
+  ctx.strokeStyle = 'rgba(58, 40, 26, 1)';
+  ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(W * 0.06, H * 0.52);
+  ctx.quadraticCurveTo(W * 0.5, H * 0.42, W * 0.95, H * 0.30);
+  ctx.stroke();
+  // Needles: short strokes fanning downward from the twig.
+  const needle = (x, y, len, ang, tone) => {
+    const dx = Math.cos(ang) * len;
+    const dy = Math.sin(ang) * len;
+    const g = ctx.createLinearGradient(x, y, x + dx, y + dy);
+    g.addColorStop(0, `rgba(${52 + tone * 0.7}, ${92 + tone * 0.9}, ${54 + tone * 0.5}, 1)`);
+    g.addColorStop(1, `rgba(${76 + tone}, ${134 + tone}, ${74 + tone * 0.6}, 1)`);
+    ctx.strokeStyle = g;
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.quadraticCurveTo(x + dx * 0.5, y + dy * 0.5 + 3, x + dx, y + dy);
+    ctx.stroke();
+  };
+  const rng = (i) => {
+    let s = i * 16807 % 2147483647;
+    return () => (s = (s * 16807) % 2147483647) / 2147483647;
+  };
+  const rand = rng(777);
+  for (let layer = 0; layer < 2; layer++) {
+    const n = layer === 0 ? 120 : 80;
+    for (let i = 0; i < n; i++) {
+      const t = 0.05 + rand() * 0.9;
+      const x = W * 0.06 + t * (W * 0.89);
+      const y = H * 0.52 - t * H * 0.2 + (rand() - 0.5) * 36 + layer * 10;
+      const len = 26 + rand() * 42 - layer * 4;
+      const ang = 1.15 + (rand() - 0.5) * 0.9; // downward fan
+      needle(x, y, len, ang, 10 + rand() * 34);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  return texture;
+}
+
+/**
+ * Broadleaf cluster: twig with oval leaves (mid-green, sunlit tips).
+ * Alpha-tested card for canopy shells.
+ */
+export function createLeafTexture() {
+  const W = 256;
+  const H = 256;
+  const { canvas, ctx } = canvas2d(W, H);
+  ctx.clearRect(0, 0, W, H);
+  const leafShape = (x, y, len, wid, ang, tone, alpha = 1) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ang);
+    const g = ctx.createLinearGradient(0, 0, 0, len);
+    g.addColorStop(0, `rgba(${40 + tone * 0.6}, ${74 + tone * 0.8}, ${34 + tone * 0.4}, ${alpha})`);
+    g.addColorStop(1, `rgba(${78 + tone}, ${128 + tone}, ${58 + tone * 0.6}, ${alpha})`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(wid, len * 0.35, 0, len);
+    ctx.quadraticCurveTo(-wid, len * 0.35, 0, 0);
+    ctx.fill();
+    // Centre vein
+    ctx.strokeStyle = `rgba(${30 + tone * 0.5}, ${56 + tone * 0.6}, ${26 + tone * 0.3}, ${alpha * 0.7})`;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, 2);
+    ctx.lineTo(0, len - 2);
+    ctx.stroke();
+    ctx.restore();
+  };
+  const rng = (i) => {
+    let s = i * 48271 % 2147483647;
+    return () => (s = (s * 48271) % 2147483647) / 2147483647;
+  };
+  const rand = rng(4242);
+  // Twigs
+  ctx.strokeStyle = 'rgba(66, 46, 30, 1)';
+  ctx.lineWidth = 4;
+  for (let i = 0; i < 5; i++) {
+    const x = W * (0.2 + rand() * 0.6);
+    const y = H * (0.35 + rand() * 0.4);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.quadraticCurveTo(x + (rand() - 0.5) * 90, y - 40, x + (rand() - 0.5) * 120, y - 70 - rand() * 40);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 46; i++) {
+    const x = W * (0.12 + rand() * 0.76);
+    const y = H * (0.10 + rand() * 0.68);
+    const len = 26 + rand() * 30;
+    const wid = 10 + rand() * 9;
+    const ang = rand() * Math.PI * 2;
+    leafShape(x, y, len, wid, ang, rand() * 60);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  return texture;
+}
+
+/**
+ * Stone-block albedo: coursed blocks with mortar lines and per-block tone
+ * variation. Tiled for structure walls.
+ */
+export function createStoneTexture(size = 256) {
+  const { canvas, ctx } = canvas2d(size);
+  const image = ctx.createImageData(size, size);
+  const rows = 6;
+  const cols = 4;
+  const blockWidth = size / cols;
+  const blockHeight = size / rows;
+  const tones = Array.from({ length: rows }, (_, row) =>
+    Array.from({ length: cols }, (_, col) =>
+      (fbm2(col * 3.1 + row * 7.7, row * 2.3, 2, 555) * 0.5 + 0.5) * 36 - 18));
+  for (let y = 0; y < size; y++) {
+    const row = Math.floor(y / blockHeight);
+    const localY = y - row * blockHeight;
+    // Alternate half-block offsets make a running bond that tiles seamlessly.
+    const offset = row % 2 ? blockWidth / 2 : 0;
+    for (let x = 0; x < size; x++) {
+      const shifted = (x + offset) % size;
+      const col = Math.floor(shifted / blockWidth);
+      const localX = shifted - col * blockWidth;
+      const tone = tones[row][col];
+      const edge = (localX < 2 || localX > blockWidth - 2 || localY < 2 || localY > blockHeight - 2) ? -27 : 0;
+      const n = valueNoise2(x * 0.07, y * 0.07, 561) * 22 - 11;
+      const i = (y * size + x) * 4;
+      image.data[i] = 138 + tone + edge + n;
+      image.data[i + 1] = 135 + tone + edge + n;
+      image.data[i + 2] = 122 + tone + edge + n;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+/** Wood-plank albedo: horizontal grain streaks and plank seams. */
+export function createWoodTexture(size = 256) {
+  const { canvas, ctx } = canvas2d(size);
+  const image = ctx.createImageData(size, size);
+  const planks = 5;
+  for (let y = 0; y < size; y++) {
+    const plank = Math.floor((y / size) * planks);
+    const tone = (fbm2(plank * 5.3, 1.1, 2, 777) * 0.5 + 0.5) * 34 - 17;
+    for (let x = 0; x < size; x++) {
+      const grain = Math.sin((x * 0.11 + fbm2(x * 0.02, y * 0.05, 2, 779) * 30) * 1.7) * 14;
+      const seam = (y % Math.floor(size / planks) < 2) ? -38 : 0;
+      const n = valueNoise2(x * 0.09, y * 0.09, 781) * 16 - 8;
+      const i = (y * size + x) * 4;
+      image.data[i] = 104 + tone + grain + seam + n;
+      image.data[i + 1] = 76 + tone + grain + seam + n;
+      image.data[i + 2] = 54 + tone * 0.7 + grain + seam + n;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
+}
+
 /** Soft cloud puff sprite for low-altitude mist. */
 export function createCloudTexture(size = 256) {
   const { canvas, ctx } = canvas2d(size);

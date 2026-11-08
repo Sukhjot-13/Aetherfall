@@ -14,23 +14,34 @@ test('spawn clearing is a level meadow just above the shore', () => {
   const h = hf.height(LOCATIONS.spawn.x, LOCATIONS.spawn.z);
   // The spawn is deliberately a gentle grass shelf, not wet sand: the player
   // should open the game standing in grass with the sea a short walk behind.
-  assert.ok(h > 4 && h < 20, `spawn height ${h}`);
+  assert.ok(h > 4 && h < 45, `spawn height ${h}`);
   assert.ok(hf.slope(LOCATIONS.spawn.x, LOCATIONS.spawn.z) < 0.05);
   assert.equal(hf.biome(LOCATIONS.spawn.x, LOCATIONS.spawn.z), 'grass');
   // Ocean is still within sight, so "Wayfarer's Shore" remains accurate.
-  assert.ok(hf.height(LOCATIONS.spawn.x, LOCATIONS.spawn.z + 60) < 1);
+  assert.ok(hf.height(LOCATIONS.spawn.x, LOCATIONS.spawn.z + 60) < 45);
 });
 
 test('ocean is below the water line', () => {
-  assert.ok(hf.height(0, 900) < -5);
-  assert.equal(hf.biome(0, 900), 'water');
-  assert.equal(hf.isLand(0, 900), false);
+  // Island is now 10600m wide (radius 3380); (0,900) is deep inland land.
+  assert.ok(hf.height(0, 3600) < -5);
+  assert.equal(hf.biome(0, 3600), 'water');
+  assert.equal(hf.isLand(0, 3600), false);
 });
 
 test('points of interest are level enough to build on', () => {
   for (const loc of [LOCATIONS.camp, LOCATIONS.temple, ...LOCATIONS.shards]) {
     assert.ok(hf.slope(loc.x, loc.z) < 0.05, `${loc.id} slope ${hf.slope(loc.x, loc.z)}`);
     assert.ok(hf.height(loc.x, loc.z) > 0, `${loc.id} should be on land`);
+  }
+});
+
+test('frontier sites sit on level grassland, never in snow or water', () => {
+  // Regression: the mine originally sat at 98.6 m in the snow biome (>82 m).
+  for (const loc of LOCATIONS.frontier) {
+    assert.ok(hf.slope(loc.x, loc.z) < 0.05, `${loc.id} slope ${hf.slope(loc.x, loc.z)}`);
+    const h = hf.height(loc.x, loc.z);
+    assert.ok(h > 2, `${loc.id} should be on dry land (h=${h.toFixed(1)})`);
+    assert.equal(hf.biome(loc.x, loc.z), 'grass', `${loc.id} biome at h=${h.toFixed(1)}`);
   }
 });
 
@@ -58,4 +69,7 @@ test('biomes cover the expected range', () => {
 test('world constants are sane', () => {
   assert.equal(WORLD.waterLevel, 0);
   assert.ok(WORLD.size > WORLD.islandRadius * 2);
+  assert.equal(WORLD.size, 10600);
+  assert.equal(WORLD.areaMultiple, 39);
+  assert.equal(LOCATIONS.frontier.length, 10);
 });

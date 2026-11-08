@@ -16,6 +16,7 @@ const MANA_REGEN_FORM = 15;
 const HEALTH_REGEN = 2.2;
 const HEALTH_REGEN_DELAY = 6.5;
 const STAMINA_REGEN = 24;
+const STAMINA_RECOVERY_DELAY = 0.6;
 const FORM_SPEED = 1.55;
 const FORM_DAMAGE = 1.6;
 const FORM_JUMP = 1.25;
@@ -42,6 +43,7 @@ export function createPowerState(overrides = {}) {
     shieldRemaining: 0,
     /** Seconds until health regeneration resumes. */
     regenDelay: 0,
+    staminaRegenDelay: 0,
     /** Master-mode sandbox flag: spells cost no mana. Never serialized. */
     infinite: false,
     dead: false,
@@ -134,7 +136,10 @@ export function castSpell(state, id) {
 export function tickPowers(state, dt, { inCombat = false } = {}) {
   const form = state.formRemaining > 0;
   state.mana = clamp(state.mana + (form ? MANA_REGEN_FORM : MANA_REGEN) * dt, 0, state.maxMana);
-  state.stamina = clamp(state.stamina + STAMINA_REGEN * dt, 0, state.maxStamina);
+  const staminaDelay = Math.max(0, state.staminaRegenDelay ?? 0);
+  state.staminaRegenDelay = Math.max(0, staminaDelay - dt);
+  const recoveryTime = Math.max(0, dt - staminaDelay);
+  state.stamina = clamp(state.stamina + STAMINA_REGEN * recoveryTime, 0, state.maxStamina);
 
   for (const id of Object.keys(state.cooldowns)) {
     const next = state.cooldowns[id] - dt;
@@ -195,6 +200,7 @@ export function restoreMana(state, amount) {
 export function consumeStamina(state, amount) {
   if (state.stamina < amount) return false;
   state.stamina = clamp(state.stamina - amount, 0, state.maxStamina);
+  if (amount > 0) state.staminaRegenDelay = STAMINA_RECOVERY_DELAY;
   return true;
 }
 
@@ -228,16 +234,23 @@ export function revive(state) {
   state.shieldRemaining = 0;
   state.formRemaining = 0;
   state.regenDelay = 0;
+  state.staminaRegenDelay = 0;
   return state;
 }
 
 /** Serialise only the durable parts of the power state for saves. */
 export function serializePowers(state) {
+  // Maxes are durable: mission rewards raise them (emberTrial +12 HP,
+  // veilHunt +12 mana, lanternWay +10 stamina). They used to be dropped,
+  // so Continue silently reset upgraded characters to base.
   return {
     unlocked: [...state.unlocked],
     health: state.health,
     mana: state.mana,
     stamina: state.stamina,
+    maxHealth: state.maxHealth,
+    maxMana: state.maxMana,
+    maxStamina: state.maxStamina,
   };
 }
 
@@ -252,6 +265,12 @@ export function deserializePowers(data = {}) {
     state.unlocked = data.unlocked.filter((id) => known.includes(id) || isPassive(id));
     if (!state.unlocked.includes('emberBolt')) state.unlocked.unshift('emberBolt');
   }
+  // Maxes first (clamped to base..base+bonus ceiling), then currents.
+  // Old saves lack maxes — they fall back to base and Game replays mission
+  // rewards from quest state so those characters still upgrade.
+  if (Number.isFinite(data.maxHealth)) state.maxHealth = clamp(data.maxHealth, MAX_HEALTH, MAX_HEALTH + 12);
+  if (Number.isFinite(data.maxMana)) state.maxMana = clamp(data.maxMana, MAX_MANA, MAX_MANA + 12);
+  if (Number.isFinite(data.maxStamina)) state.maxStamina = clamp(data.maxStamina, MAX_STAMINA, MAX_STAMINA + 10);
   if (Number.isFinite(data.health)) state.health = clamp(data.health, 1, state.maxHealth);
   if (Number.isFinite(data.mana)) state.mana = clamp(data.mana, 0, state.maxMana);
   if (Number.isFinite(data.stamina)) state.stamina = clamp(data.stamina, 0, state.maxStamina);

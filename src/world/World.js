@@ -12,6 +12,7 @@ import { Sky } from './Sky.js';
 import { Water } from './Water.js';
 import { Vegetation } from './Vegetation.js';
 import { Structures } from './Structures.js';
+import { CollisionGrid } from './CollisionGrid.js';
 
 /** Yield to the browser so the loading screen can repaint. */
 function nextFrame() {
@@ -54,13 +55,22 @@ export class World {
 
   /**
    * Build the island, reporting progress to the loading screen.
+   * Everything here is procedural (no async asset fetches), so the bar is
+   * honest: each step is real work, yielded between steps so it repaints.
    * @param {(progress:number, label:string)=>void} [onProgress]
    */
+  /** Wall-clock ms of the last build (terrain→colliders). */
+  buildMs = 0;
+  /** Per-step ms of the last build, for boot-timing comparison. */
+  buildSteps = [];
+
   async build(onProgress = () => {}) {
+    const start = performance.now();
+    this.buildSteps = [];
     const steps = [
-      ['Raising mountains…', () => {
+      ['Raising mountains…', async () => {
         this.terrain = new Terrain(this.scene, this.heightfield, this.quality);
-        this.terrain.build();
+        await this.terrain.build(undefined, nextFrame);
       }],
       ['Lighting the sky…', () => {
         this.sky = new Sky(this.scene, this.renderer, this.quality);
@@ -79,17 +89,32 @@ export class World {
       }],
       ['Gathering aether…', () => {
         this.colliders = [...this.vegetation.colliders, ...this.structures.colliders];
+        this.collisionGrid = new CollisionGrid(this.colliders);
       }],
     ];
 
+    let lastYield = performance.now();
     for (let i = 0; i < steps.length; i++) {
       const [label, run] = steps[i];
       onProgress(i / steps.length, label);
-      await nextFrame();
-      run();
+      // Let the current label paint before a heavy step, including the first.
+      if (i === 0 || performance.now() - lastYield >= 12) {
+        await nextFrame();
+        lastYield = performance.now();
+      }
+      const stepStart = performance.now();
+      await run();
+      this.buildSteps.push({ label, ms: performance.now() - stepStart });
+      onProgress((i + 1) / steps.length, label);
     }
     onProgress(1, 'The isle is ready.');
+    this.buildMs = performance.now() - start;
     return this;
+  }
+
+  /** Nearby solid props, with invisible quality-tier trees excluded. */
+  queryColliders(x, z, radius = 0) {
+    return this.collisionGrid?.query(x, z, radius) ?? this.colliders.filter((c) => c.active !== false);
   }
 
   /** Ground height at a world XZ. */
@@ -154,8 +179,9 @@ export class World {
     const advance = opts.advance !== false;
     this.sky?.update(dt, cameraPos, playerPos, advance);
     this.water?.update(this.elapsed, this.sky);
+    this.terrain?.update?.(playerPos);
     this.vegetation?.update(dt, this.elapsed, playerPos, this.sky?.nightFactor ?? 0);
-    this.structures?.update(dt, this.elapsed);
+    this.structures?.update(dt, this.elapsed, playerPos);
   }
 
   /** Light the Beacon for good. */

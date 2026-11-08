@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>capture</title><style>body{margin:0;background:#111}</style></head>
+<body>
+<script type="module">
+window.addEventListener('error', (e) => { document.title = `CAPTURE:error:${e.message}`; });
+window.addEventListener('unhandledrejection', (e) => { document.title = `CAPTURE:reject:${e.reason?.message ?? e.reason}`; });
+import * as THREE from 'three';
+import { createHeightfield } from './src/world/heightfield.js';
+import { Terrain } from './src/world/Terrain.js';
+import { Vegetation } from './src/world/Vegetation.js';
+import { Structures } from './src/world/Structures.js';
+import { PlayerModel } from './src/player/PlayerModel.js';
+import { Enemies } from './src/gameplay/Enemies.js';
+import { Effects } from './src/gameplay/Effects.js';
+import { LOCATIONS } from './src/world/locations.js';
+import { fbm2 } from './src/util/noise.js';
+
+const params = new URLSearchParams(location.search);
+const view = params.get('view') || 'forest';
+// Multi-frame proof: walk0..walk3 sample the stride; deathA/B/C sample the
+// death tween. Frontier sites: mine, castle, village, crypt, sky, glass,
+// wastes, docks, spire, fjord (or any frontier id).
+const walkPhase = view.startsWith('walk') ? Number(view.slice(4) || '1') : null;
+const deathPhase = view === 'deathA' ? 0.15 : view === 'deathB' ? 0.5 : view === 'deathC' ? 0.9
+  : view === 'death' ? 0.5 : null;
+const frontierId = { village: 'saltVillage', crypt: 'sunkenCrypt', sky: 'skyTemple', glass: 'glassHollow',
+  wastes: 'emberWastes', docks: 'moonlitDocks', spire: 'stormSpire', fjord: 'frostFjord' }[view]
+  ?? LOCATIONS.frontier.find((l) => l.id === view)?.id ?? null;
+const specialView = view === 'waterfall' || view === 'mesa' || view === 'spawn' ? view : null;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+renderer.setSize(960, 540);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.02;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#87b5d9');
+scene.fog = new THREE.FogExp2(0x9fbfd4, 0.0007);
+
+const camera = new THREE.PerspectiveCamera(60, 960/540, 0.1, 2000);
+
+const hf = createHeightfield();
+// Denser than the game so the capture reads as forest.
+const quality = { terrainDetail: 1, treeCount: 2400, grassCount: 6000, shadowMapSize: 1024 };
+
+const terrain = new Terrain(scene, hf, quality);
+terrain.build();
+
+// find a dense forest spot: max forest mask within 120-260m of spawn
+let best = { x: LOCATIONS.spawn.x + 80, z: LOCATIONS.spawn.z - 40, f: -1 };
+for (let x = LOCATIONS.spawn.x - 260; x < LOCATIONS.spawn.x + 260; x += 8) {
+  for (let z = LOCATIONS.spawn.z - 260; z < LOCATIONS.spawn.z + 260; z += 8) {
+    const h = hf.height(x, z);
+    if (h < 4 || h > 60) continue;
+    const f = fbm2(x * 0.0055, z * 0.0055, 3, 33) * 0.5 + 0.5;
+    if (f > best.f) best = { x, z, f };
+  }
+}
+document.title = `CAPTURE:forest=${best.f.toFixed(2)}@${Math.round(best.x)},${Math.round(best.z)}`;
+
+// Concentrate the vegetation around the chosen forest point so the frame
+// fills with woods instead of island-wide sparsity.
+const veg = new Vegetation(scene, hf, { ...quality, forestFocus: best, forestFocusRadius: 110 });
+veg.build();
+
+// Frontier + landmarks for mine/castle views.
+const structures = new Structures(scene, hf);
+structures.build();
+
+// sun + hemi matching Sky.js shadow rig
+const sun = new THREE.DirectionalLight(0xfff3d6, 2.6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -80; sun.shadow.camera.right = 80;
+sun.shadow.camera.top = 80; sun.shadow.camera.bottom = -80;
+sun.shadow.camera.near = 1; sun.shadow.camera.far = 520;
+sun.shadow.bias = -0.00042; sun.shadow.normalBias = 0.025; sun.shadow.radius = 2.2;
+sun.shadow.camera.updateProjectionMatrix();
+scene.add(sun); scene.add(sun.target);
+const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x3b4a2a, 0.85);
+scene.add(hemi);
+
+// hero + enemies + effects for the FX view
+// Hero views (close-up, walk, FX/death) stand on the spawn clearing so no
+// focused-forest pine sits on the model; forest/trees views stay at best.
+const heroOnClearing = view === 'hero' || walkPhase !== null || view === 'fx' || deathPhase !== null;
+const heroSpot = heroOnClearing ? LOCATIONS.spawn : best;
+const hero = new PlayerModel();
+const hx = heroSpot.x, hz = heroSpot.z;
+const hy = hf.height(hx, hz);
+hero.root.position.set(hx, hy, hz);
+hero.root.rotation.y = Math.PI * 0.85;
+scene.add(hero.root);
+hero.update(0.016, { speed: 0, grounded: true });
+
+const fx = new Effects(scene, { camera });
+const worldStub = { heightAt: (x, z) => hf.height(x, z), islandRadius: 3380 };
+const playerStub = { position: new THREE.Vector3(hx + 3, hy, hz + 3), invulnerable: false };
+const enemies = new Enemies({
+  scene, world: worldStub, player: playerStub,
+  powers: { dead: false, shieldHp: 0 },
+  effects: fx, audio: null, camera: null,
+});
+const enemy = enemies.spawn('stalker', hx + 2.5, hz - 2);
+if (view === 'hero' || walkPhase !== null) enemy.group.visible = false;
+if (view === 'fx') {
+  // mid-hit: trigger the damage FX bundle, then freeze one frame in.
+  enemies.damage(enemy, 10, { color: '#ffc48a', crit: true });
+  fx.update(0.016);
+} else if (deathPhase !== null) {
+  // death: lethal crit then advance the death tween to the sampled phase.
+  enemies.damage(enemy, 9999, { color: '#ffc48a', crit: true });
+  enemies.update(0.016, deathPhase);
+  fx.update(0.016);
+}
+
+const gy = hf.height(best.x, best.z);
+sun.position.set(best.x + 120, gy + 140, best.z - 60);
+sun.target.position.set(best.x, gy, best.z);
+sun.target.updateMatrixWorld();
+
+if (view === 'hero') {
+  camera.position.set(hx + 2.1, hy + 1.7, hz + 2.7);
+  camera.lookAt(hx, hy + 1.0, hz);
+} else if (walkPhase !== null) {
+  // Multi-frame walk: sample four quarter-stride phases at the same speed.
+  // Phase advances with dt * (2.1 + speed * 1.42) in PlayerModel, matching
+  // gait.strideRate, so frame N is a distinct contact pose.
+  const steps = [3, 7, 11, 15][walkPhase] ?? 3;
+  for (let i = 0; i < steps; i++) hero.update(0.016, { speed: 6, grounded: true });
+  hero.root.rotation.y = Math.PI * 0.85;
+  camera.position.set(hx + 2.6, hy + 1.6, hz + 3.4);
+  camera.lookAt(hx, hy + 0.9, hz);
+} else if (view === 'fx' || deathPhase !== null) {
+  // Hide the hero so the enemy fills the frame, then frame the enemy.
+  hero.root.visible = false;
+  const ex = hx + 2.5, ez = hz - 2, ey = hf.height(ex, ez);
+  camera.position.set(ex - 4.2, ey + 2.0, ez + 4.2);
+  camera.lookAt(ex, ey + 0.7, ez);
+} else if (view === 'trees') {
+  camera.position.set(hx + 7, hy + 3.5, hz + 9);
+  camera.lookAt(hx, hy + 3, hz);
+} else if (view === 'mine') {
+  // Aether Mine frontier: timber mouth + ore glow on the flattened POI.
+  const m = LOCATIONS.frontier.find((l) => l.id === 'aetherMine');
+  const my = hf.height(m.x, m.z);
+  sun.position.set(m.x + 60, my + 80, m.z - 40);
+  sun.target.position.set(m.x, my, m.z);
+  sun.target.updateMatrixWorld();
+  camera.position.set(m.x + 14, my + 5, m.z + 18);
+  camera.lookAt(m.x, my + 2.5, m.z);
+} else if (view === 'castle') {
+  // Embercastle frontier: keep + towers + gatehouse.
+  const c = LOCATIONS.frontier.find((l) => l.id === 'emberCastle');
+  const cy = hf.height(c.x, c.z);
+  sun.position.set(c.x + 80, cy + 90, c.z - 50);
+  sun.target.position.set(c.x, cy, c.z);
+  sun.target.updateMatrixWorld();
+  camera.position.set(c.x + 30, cy + 12, c.z + 42);
+  camera.lookAt(c.x, cy + 5, c.z);
+} else if (specialView === 'waterfall') {
+  const wx = 750, wz = 1150;
+  const wy = hf.height(wx, wz) + 26;
+  sun.position.set(wx + 60, wy + 60, wz - 40);
+  sun.target.position.set(wx, wy - 16, wz);
+  sun.target.updateMatrixWorld();
+  camera.position.set(790, hf.height(790, 1180) + 5, 1180);
+  camera.lookAt(wx, wy - 14, wz);
+  document.title += ':waterfall';
+} else if (specialView === 'mesa') {
+  const mx = 750, mz = 1050;
+  const my = hf.height(mx, mz);
+  sun.position.set(mx + 80, my + 80, mz - 50);
+  sun.target.position.set(mx, my, mz);
+  sun.target.updateMatrixWorld();
+  camera.position.set(mx + 90, my + 28, mz + 110);
+  camera.lookAt(mx, my + 6, mz);
+} else if (specialView === 'spawn') {
+  const sx = LOCATIONS.spawn.x, sz = LOCATIONS.spawn.z;
+  const sy = hf.height(sx, sz);
+  sun.position.set(sx + 80, sy + 90, sz - 50);
+  sun.target.position.set(sx, sy, sz);
+  sun.target.updateMatrixWorld();
+  camera.position.set(sx + 42, sy + 14, sz + 55);
+  camera.lookAt(sx, sy + 2, sz);
+} else if (frontierId) {
+  // Generic frontier framing for the remaining eight sites.
+  const f = LOCATIONS.frontier.find((l) => l.id === frontierId);
+  const fy = hf.height(f.x, f.z);
+  sun.position.set(f.x + 70, fy + 85, f.z - 45);
+  sun.target.position.set(f.x, fy, f.z);
+  sun.target.updateMatrixWorld();
+  camera.position.set(f.x + 22, fy + 10, f.z + 32);
+  camera.lookAt(f.x, fy + 4, f.z);
+} else {
+  camera.position.set(hx + 6, hy + 2.2, hz + 8);
+  camera.lookAt(hx, hy + 1.2, hz);
+}
+
+renderer.render(scene, camera);
+document.title += ':rendered';
+</script>
+</body>
+</html>

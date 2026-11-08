@@ -43,7 +43,7 @@ export const MOVE = Object.freeze({
   landRollDuration: 0.55,
   heavyLandSpeed: 17,
   maxFallSpeed: 48,
-  worldEdge: 640,
+  worldEdge: 2900,
 });
 
 /** Move `current` toward `target` by at most `rate * dt`; never overshoots. */
@@ -67,6 +67,18 @@ export function approach(current, target, rate, dt) {
 export function approachAxis(current, target, accel, decel, dt) {
   const speedingUp = Math.abs(target) > Math.abs(current) && Math.sign(target || 1) === Math.sign(current || 1);
   return approach(current, target, speedingUp ? accel : decel, dt);
+}
+
+/** Move horizontal velocity toward its target at a bounded, frame-rate-independent rate. */
+export function approachVelocity(vx, vz, targetX, targetZ, accel, decel, dt) {
+  const dx = targetX - vx, dz = targetZ - vz;
+  const delta = Math.hypot(dx, dz);
+  if (delta < 1e-8) return { x: targetX, z: targetZ };
+  const reversing = vx * targetX + vz * targetZ < -0.1;
+  const accelerating = !reversing && Math.hypot(targetX, targetZ) > Math.hypot(vx, vz);
+  const rate = reversing ? decel * MOVE.turnAssist : accelerating ? accel : decel;
+  const blend = Math.min(1, Math.max(0, rate) * Math.max(0, dt) / delta);
+  return { x: vx + dx * blend, z: vz + dz * blend };
 }
 
 /**

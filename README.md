@@ -2,9 +2,11 @@
 
 An original open-world fantasy adventure that runs in the browser. You are the
 last spark on a dying island: recover the Aether Shards, relight the Beacon, and
-face **Vaelor, the Veil Sovereign**. Everything — terrain, sky, water, trees,
-characters, magic, the boss arena and sound — is generated procedurally at
-runtime. No external art assets.
+face **Vaelor, the Veil Sovereign**. The terrain, sky, water, vegetation, magic, boss arena and audio are generated
+procedurally. The Wayfarer uses a textured, skinned character and retargeted
+locomotion; asset sources and licensing are documented in
+[`public/assets/hero/ATTRIBUTION.md`](public/assets/hero/ATTRIBUTION.md) and
+[`public/assets/enemies/ATTRIBUTION.md`](public/assets/enemies/ATTRIBUTION.md).
 
 ## Run it
 
@@ -66,7 +68,9 @@ climbs, looking down dives, and `A`/`D` strafe horizontally.
 ## Finale — Vaelor, the Veil Sovereign
 
 The first draft ends with a dedicated three-phase boss at the Beacon of Aether.
-Place all three shards, then interact with the altar to start the encounter.
+Place all three shards, finish the two pre-finale missions (Trial of Embers and
+The Turning Veil — the altar will not open until both are done), then interact
+with the altar to start the encounter.
 Vaelor fights with telegraphed cleaves, orb volleys, ground slams and shockwaves,
 void rifts, radial storms and summoned Veil Echoes. Cleave, slam and rift
 wind-ups are readable in his body pose and on the floor. Phase breaks at 66 % and
@@ -80,12 +84,21 @@ After the ending, the altar offers **Challenge Vaelor Again** with a phase
 selector, so the fight can be replayed from Phase I, II or III without touching
 your save. Rematch victories return straight to exploration.
 
+## Side quest — The Lantern Way
+
+Eight old sailing lanterns mark a road from the south shore to the temple ring.
+Wake them in order (the minimap rings the next one) to widen your breath: each
+wake deepens your stamina, and the final lantern grants +10 max stamina for the
+rest of the run.
+
 ## Movement
 
 The controller uses asymmetric acceleration/braking, a sprint ramp with stamina,
 slope speed and steep-slide response, variable-height jumps with coyote time and
 jump buffering, air control, Sky Leap, a stamina dodge with i-frames, heavy-landing
-rolls, camera look-ahead/dip and stride-based footsteps.
+rolls, camera look-ahead/dip and stride-based footsteps. Shallow water and wet
+sand paddle you back to shore on Space, and wading splashes with a water
+footstep.
 
 ## Magic
 
@@ -116,6 +129,10 @@ locked enemy for a moment. Aim assist can be tuned or disabled in **Settings**
 ## Tech
 
 - Three.js `0.186` (WebGL, `EffectComposer` + Unreal Bloom + ACES tone mapping)
-- Procedural seven-triangle grass tufts, denser forests, flight body pitch/bank
+- Procedural grass tufts, clustered forests with undergrowth, and flight body pitch/bank
+- Spatially culled vegetation tiles with synchronized foliage quality and collision
+- Textured, skinned Wayfarer with blended idle, walk and run animation; a procedural fallback keeps the game playable if assets fail to load
+- Batched character meshes, shared grass height samples, local light pooling and adaptive resolution
+- Procedural audio: wind/sea/insect beds, layered spell sounds, kill stings
 - Vite `8`
 - Node's built-in test runner (`node --test`)

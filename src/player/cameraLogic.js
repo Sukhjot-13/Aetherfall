@@ -19,7 +19,7 @@ export const THIRD_PERSON = Object.freeze({
 });
 
 export const FIRST_PERSON = Object.freeze({
-  eyeHeight: 1.66,
+  eyeHeight: 1.68,
 });
 
 /** Create orbit state. Yaw 0 looks toward -Z. */

@@ -46,7 +46,16 @@ test('full happy path reaches free roam', () => {
 
   assert.equal(state.stage, STAGES.RETURN);
   assert.equal(hasAllShards(state), true);
-  assert.equal(objectiveFor(state).marker, 'temple');
+  // The altar will not open until the two pre-finale missions are done.
+  const blocked = questReducer(state, { type: 'interact-altar' });
+  assert.equal(blocked.changed, false);
+  assert.equal(blocked.state.stage, STAGES.RETURN);
+
+  for (let i = 0; i < 8; i++) {
+    state = questReducer(state, { type: 'enemy-killed' }).state;
+  }
+  assert.equal(state.missions.emberTrial, 3);
+  assert.equal(state.missions.veilHunt, 5);
 
   const finale = questReducer(state, { type: 'interact-altar' });
   assert.equal(finale.changed, true);
@@ -106,4 +115,41 @@ test('reducer does not mutate the input state', () => {
   const state = createQuestState();
   questReducer(state, { type: 'talk', npc: 'wisp' });
   assert.equal(state.stage, STAGES.AWAKEN);
+});
+
+test('veil hunt stays locked until the ember trial is complete', () => {
+  let state = createQuestState();
+  state = questReducer(state, { type: 'talk', npc: 'wisp' }).state;
+  state = questReducer(state, { type: 'talk', npc: 'sable' }).state;
+  for (const shard of LOCATIONS.shards) state = questReducer(state, { type: 'collect-shard', id: shard.id }).state;
+  assert.equal(state.stage, STAGES.RETURN);
+  // Kills before the trial is done go to the trial only.
+  for (let i = 0; i < 2; i++) state = questReducer(state, { type: 'enemy-killed' }).state;
+  assert.equal(state.missions.emberTrial, 2);
+  assert.equal(state.missions.veilHunt, 0);
+  // The third kill finishes the trial; the veil only opens after.
+  state = questReducer(state, { type: 'enemy-killed' }).state;
+  assert.equal(state.missions.emberTrial, 3);
+  state = questReducer(state, { type: 'enemy-killed' }).state;
+  assert.equal(state.missions.veilHunt, 1);
+});
+
+test('kills do not advance the lantern way', () => {
+  let state = createQuestState();
+  state = questReducer(state, { type: 'talk', npc: 'wisp' }).state;
+  state = questReducer(state, { type: 'talk', npc: 'sable' }).state;
+  for (let i = 0; i < 10; i++) state = questReducer(state, { type: 'enemy-killed' }).state;
+  assert.equal(state.sideQuest.lanternWay, 0);
+});
+
+
+test('return objectives direct the player to the active hunt and then the Beacon', () => {
+  let state = createQuestState();
+  state.stage = STAGES.RETURN;
+  state.shards = LOCATIONS.shards.map((shard) => shard.id);
+  state.missions.emberTrial = 3;
+  assert.equal(objectiveFor(state).marker, 'camp');
+  assert.match(objectiveFor(state).hint, /Emberfall Camp/);
+  for (let i = 0; i < 5; i++) state = questReducer(state, { type: 'enemy-killed' }).state;
+  assert.equal(objectiveFor(state).marker, 'temple');
 });

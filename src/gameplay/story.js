@@ -35,6 +35,8 @@ export const DIALOGUES = Object.freeze({
     { speaker: 'sable', text: 'Wardens guard them now. Creatures of smoke and old grief. You will need magic to put them down.' },
     { speaker: 'sable', text: 'Your spark is Ember. Crude, but it burns. Take the shards, and the light will teach you more.' },
     { speaker: 'sable', text: 'Whisperwood Grove to the west. Tidewreck Ruins along the eastern cliffs. Stormpeak, high in the north. Go.' },
+    { speaker: 'sable', text: 'One more thing, before you wander off: prove you can carry the light, not just hold it. Fell three Veil beasts — call it the Trial of Embers. The Beacon remembers those who bled for it.' },
+    { speaker: 'sable', text: 'And the wisp will tell you about the old Lantern Way. It is older than the Beacon and kinder than I am, so listen to it.' },
   ]),
   sableHint: Object.freeze([
     { speaker: 'sable', text: 'The shards will not come to you. Cut down the Warden, then claim what it guarded.' },
@@ -46,6 +48,13 @@ export const DIALOGUES = Object.freeze({
     { speaker: 'wisp', text: 'Motes of aether drift all over the isle. Let them fill you.' },
     { speaker: 'wisp', text: 'The shards sing louder the closer you get. Follow the light.' },
   ]),
+  lanternWay: Object.freeze([
+    { speaker: 'wisp', text: 'Old sailing lanterns lit the Lantern Way before the Beacon did. Their keepers are all ash now, but the light remembers the road.' },
+    { speaker: 'wisp', text: 'Walk it with me, Wayfarer. If we wake eight of the old lanterns together, it will widen your lungs and steady your step.' },
+  ]),
+  lanternDone: Object.freeze([
+    { speaker: 'wisp', text: 'Eight lanterns. The Lantern Way is awake again — do you feel it? Your breath comes easier. The road feels shorter.' },
+  ]),
   sableFree: Object.freeze([
     { speaker: 'sable', text: 'The Beacon is burning and I am still here. I suppose that makes you the Keeper now.' },
     { speaker: 'sable', text: 'Go on. The isle is yours to wander. I will keep the fire.' },
@@ -54,8 +63,21 @@ export const DIALOGUES = Object.freeze({
     { speaker: 'beacon', text: 'THE LIGHT REMEMBERS. AND IT WILL REMEMBER YOU.' },
     { speaker: 'wisp', text: 'Every ship in the western sea just found its way home.' },
   ]),
+  sableTrialPending: Object.freeze([
+    { speaker: 'sable', text: 'The three shards are safe, but the Trial of Embers is not finished. Veil creatures are gathering outside camp. Finish the trial first.' },
+  ]),
+  sableReady: Object.freeze([
+    { speaker: 'sable', text: 'The trials are done. Take the shards north to the Beacon, and be ready for whatever answers.' },
+  ]),
+  wispTrialPending: Object.freeze([
+    { speaker: 'wisp', text: 'All three shards. First, finish the Trial of Embers against the Veil outside camp; then the Turning Veil will open.' },
+  ]),
+  wispReady: Object.freeze([
+    { speaker: 'wisp', text: 'The trials are complete. The Beacon is waiting in the ring of stones to the north.' },
+  ]),
   sableReturn: Object.freeze([
     { speaker: 'sable', text: 'All three. I can feel the Beacon stirring from here.' },
+    { speaker: 'sable', text: 'Before you touch the altar, the Turning Veil still wants a fight. Fell five more Veil beasts on your way north. I am not particular about the manner.' },
     { speaker: 'sable', text: 'Go north, to the ring of stones. Place them, and do not let go.' },
   ]),
   grove: Object.freeze([
@@ -72,6 +94,7 @@ export const DIALOGUES = Object.freeze({
   ]),
   allShards: Object.freeze([
     { speaker: 'wisp', text: 'That is all three. The Beacon is waiting. I can hear it humming.' },
+    { speaker: 'wisp', text: 'The Turning Veil still waits between us and the stones. Let the old beasts spend themselves first.' },
     { speaker: 'wisp', text: 'North, Wayfarer. To the ring of stones.' },
   ]),
   altar: ALTAR_LINES,

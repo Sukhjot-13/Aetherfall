@@ -11,7 +11,7 @@ import { forwardFromYaw, rightFromYaw } from './cameraLogic.js';
 import {
   MOVE,
   airControl,
-  approachAxis,
+  approachVelocity,
   canDodge,
   dodgeDirection,
   dodgeSpeedAt,
@@ -70,6 +70,7 @@ export class Player {
     /** Sprint hold / blended sprint amount. */
     this.sprintHold = 0;
     this.sprintBlend = 0;
+    this.sprintExhausted = false;
     /** Dodge state. */
     this.dodgeTime = 0;
     this.dodgeElapsed = 0;
@@ -137,6 +138,7 @@ export class Player {
     this.rollElapsed = 0;
     this.sprintHold = 0;
     this.sprintBlend = 0;
+    this.sprintExhausted = false;
     this.speed = 0;
     this.jumpCutUsed = false;
   }
@@ -259,19 +261,23 @@ export class Player {
     const form = isFormActive(powers);
 
     // Sprint ramp: a tap is a short burst, a hold settles into full speed.
-    if (actions.sprint && this.moving && this.grounded && !this.inWater && powers.stamina > 1) {
+    if (this.sprintExhausted && powers.stamina >= powers.maxStamina * 0.25) this.sprintExhausted = false;
+    if (actions.sprint && this.moving && powers.stamina <= 1) this.sprintExhausted = true;
+    const canSprint = actions.sprint && this.moving && this.grounded && !this.inWater && !this.sprintExhausted;
+    if (canSprint && powers.stamina > 1) {
       this.sprintHold += dt;
     } else {
       this.sprintHold = 0;
     }
     const wantedSprint = sprintBlend(this.sprintHold, this.moving, powers.stamina, this.grounded, this.inWater);
     this.sprintBlend = damp(this.sprintBlend, wantedSprint, wantedSprint > this.sprintBlend ? 7 : 4.5, dt);
-    this.sprinting = this.sprintBlend > 0.34;
+    this.sprinting = canSprint && this.sprintBlend > 0.34;
     if (this.sprinting) {
       const paid = consumeStamina(powers, MOVE.sprintStaminaDrain * this.sprintBlend * dt);
       if (!paid) {
         this.sprintBlend = 0;
         this.sprinting = false;
+        this.sprintExhausted = true;
       }
     }
 
@@ -312,12 +318,11 @@ export class Player {
       this.velocity.z = this.dashDir.y * (this.dashSpeed ?? 30);
       this.velocity.y = 0;
     } else {
-      // Steering against momentum gets a little extra bite so reversals feel
-      // deliberate rather than ice-skating.
-      const reversing = this.velocity.x * dirX + this.velocity.z * dirZ < -0.1;
-      const turn = reversing ? MOVE.turnAssist : 1;
-      this.velocity.x = approachAxis(this.velocity.x, dirX * speedTarget, accel * turn, decel, dt);
-      this.velocity.z = approachAxis(this.velocity.z, dirZ * speedTarget, accel * turn, decel, dt);
+      // Bound the change of the velocity vector once. Applying another
+      // dt-based smoothing step here made acceleration depend on frame rate.
+      const velocity = approachVelocity(this.velocity.x, this.velocity.z, dirX * speedTarget, dirZ * speedTarget, accel, decel, dt);
+      this.velocity.x = velocity.x;
+      this.velocity.z = velocity.z;
       if (this.grounded && slope > 0.56) {
         const slide = slopeSlide(normal, slope);
         this.velocity.x += slide.x * dt;
@@ -326,6 +331,9 @@ export class Player {
     }
 
     // Jump buffering and coyote time.
+    // In shallow water, Space holds the player up instead of jumping, so
+    // paddling back to shore always works without needing Sky Leap.
+    // Paddling is resolved after the normal jump logic so it never blocks it.
     if (actions.jumpPressed) this.jumpBuffer = MOVE.jumpBuffer;
     this.jumpBuffer = Math.max(0, this.jumpBuffer - dt);
     if (this.grounded) this.coyote = MOVE.coyote;
@@ -354,7 +362,8 @@ export class Player {
         this.jumpsUsed += 1;
         this.jumpCutUsed = false;
         this.jumpBuffer = 0;
-        this.audio?.jump();
+        if (this.audio?.doubleJump) this.audio.doubleJump();
+        else this.audio?.jump();
         this.model.jump();
         this.effects?.ring(this.position.clone().setY(this.position.y + 0.2), {
           color: '#8ef2e0',
@@ -370,6 +379,14 @@ export class Player {
           gravity: -0.5,
         });
       }
+    }
+
+    // Paddle-up once the ground systems have had their say. Only cap upward
+    // velocity; the actual lift is applied by the buoyancy below, which keeps
+    // a normal jump's peak intact while gently taming a paddle-up.
+    const inShallowsPaddle = this.position.y < 0.35 && this.world.heightAt(this.position.x, this.position.z) < 0.35;
+    if (inShallowsPaddle || this.inWater) {
+      if (this.velocity.y > 1.6) this.velocity.y = 1.6;
     }
 
     // Variable jump height: releasing early trims the ascent once.
@@ -388,6 +405,8 @@ export class Player {
       if (this.velocity.y < -MOVE.maxFallSpeed) this.velocity.y = -MOVE.maxFallSpeed;
     }
 
+    const previousX = this.position.x;
+    const previousZ = this.position.z;
     this.position.x += this.velocity.x * dt;
     this.position.z += this.velocity.z * dt;
     this.position.y += this.velocity.y * dt;
@@ -437,7 +456,10 @@ export class Player {
       this.rollElapsed += dt;
     }
 
-    this.speed = horizontalSpeed;
+    // Drive gait, footsteps and camera from actual travel when a prop blocks
+    // movement, while limiting collision correction from creating false speed.
+    const travelSpeed = dt > 0 ? Math.hypot(this.position.x - previousX, this.position.z - previousZ) / dt : 0;
+    this.speed = Math.min(horizontalSpeed, travelSpeed);
 
     // Facing, with a smoothed turn rate for banking and cloth swing.
     const prevYaw = this.yaw;
@@ -445,13 +467,16 @@ export class Player {
     if (this.dodgeTime > 0) faceTarget = Math.atan2(-this.dodgeDir.x, -this.dodgeDir.y);
     else if (this.dashTime > 0) faceTarget = Math.atan2(-this.dashDir.x, -this.dashDir.y);
     else if (this.moving) faceTarget = Math.atan2(-dirX, -dirZ);
-    this.yaw = dampAngle(this.yaw, faceTarget, this.moving || this.dashing ? 14 : 5, dt);
+    // Soft turn: body rotates with momentum instead of snapping to the
+    // input vector; slower when idle so it settles like weight.
+    this.yaw = dampAngle(this.yaw, faceTarget, this.moving || this.dashing ? 8.5 : 4.5, dt);
     const yawRate = wrapAngle(this.yaw - prevYaw) / Math.max(dt, 1e-4);
     this.turnRate = damp(this.turnRate, yawRate, 12, dt);
 
     // Animate. Visual Y lags slightly over small terrain steps but follows
-    // exactly while airborne so jumps never look detached.
-    if (this.grounded) this.visualY = damp(this.visualY, this.position.y, 32, dt);
+    // exactly while airborne so jumps never look detached. Uphill snaps
+    // tighter so a climb can never sink the feet below the ground.
+    if (this.grounded) this.visualY = damp(this.visualY, this.position.y, this.position.y > this.visualY ? 80 : 32, dt);
     else this.visualY = this.position.y;
     this.model.root.position.set(this.position.x, this.visualY, this.position.z);
     this.model.faceYaw(this.yaw, dt);
@@ -461,6 +486,7 @@ export class Player {
       vy: this.velocity.y,
       dashing: this.dashing,
       dodging: this.dodgeTime > 0,
+      dodgeProgress: this.dodgeTime > 0 ? clamp(this.dodgeElapsed / MOVE.dodgeDuration, 0, 1) : 0,
       roll: this.rollTime > 0 ? rollProgress(this.rollElapsed, this.rollDuration) : 0,
       form,
       sprinting: this.sprinting,
@@ -471,11 +497,15 @@ export class Player {
     });
 
     // Footsteps: cadence follows the stride length so sprinting feels faster.
+    // Shallow water counts as a splash, so wading sounds different from walking.
+    const inShallows = this.position.y < 0.35 && this.world.heightAt(this.position.x, this.position.z) < 0.35;
+    // Wet sand and splashing water also pick up the water footstep.
+    const shore = this.position.y < 0.5 && this.world.heightAt(this.position.x, this.position.z) < 0.6;
     if (this.grounded && this.speed > 1.2 && !this.inWater) {
       this.footstepAccum += this.speed * dt;
       if (this.footstepAccum > strideLength(this.speed)) {
         this.footstepAccum = 0;
-        const biome = this.world.biomeAt(this.position.x, this.position.z);
+        const biome = inShallows || shore ? 'water' : this.world.biomeAt(this.position.x, this.position.z);
         this.audio?.footstep(biome);
         if (this.sprinting) {
           this.effects?.burst(this.position.clone().setY(this.position.y + 0.08), {
@@ -619,14 +649,21 @@ export class Player {
 
   /** Push out of tree trunks, rocks and pillars. */
   _resolveColliders() {
-    const colliders = this.world.colliders ?? [];
+    const colliders = this.world.queryColliders?.(this.position.x, this.position.z, this.radius + 6) ?? this.world.colliders ?? [];
     for (let i = 0; i < colliders.length; i++) {
       const c = colliders[i];
+      if (c.active === false) continue;
       const dx = this.position.x - c.x;
       const dz = this.position.z - c.z;
       const min = c.r + this.radius;
       const distSq = dx * dx + dz * dz;
-      if (distSq < min * min && distSq > 1e-8) {
+      if (distSq < 1e-8) {
+        const speed = Math.hypot(this.velocity.x, this.velocity.z);
+        const x = speed > 1e-5 ? -this.velocity.x / speed : Math.cos(this.yaw);
+        const z = speed > 1e-5 ? -this.velocity.z / speed : Math.sin(this.yaw);
+        this.position.x += x * min;
+        this.position.z += z * min;
+      } else if (distSq < min * min) {
         const dist = Math.sqrt(distSq);
         const push = (min - dist) / dist;
         this.position.x += dx * push;
@@ -649,7 +686,7 @@ export class Player {
 
   /** Eye-level world position for first person / aiming. */
   eyePosition() {
-    return new THREE.Vector3(this.position.x, this.position.y + 1.64, this.position.z);
+    return new THREE.Vector3(this.position.x, this.position.y + 1.68, this.position.z);
   }
 
   /** Current horizontal facing as a unit vector. */

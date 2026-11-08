@@ -101,8 +101,9 @@ export function loadSave(storage = globalThis.localStorage) {
 /** localStorage write. Returns true when the save was stored. */
 export function writeSave(snapshot, storage = globalThis.localStorage) {
   try {
+    if (!storage || typeof storage.setItem !== 'function') return false;
     const data = createSaveData(snapshot);
-    storage?.setItem(SAVE_KEY, JSON.stringify(data));
+    storage.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
   } catch {
     return false;

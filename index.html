@@ -165,7 +165,7 @@
           <div class="eyebrow">An open-world aether fantasy</div>
           <h1 class="game-title"><span>AETHER</span>FALL</h1>
           <p class="tagline">The Beacon is dark. The Veil is rising.<br />You are the last spark.</p>
-          <div class="title-actions">
+          <div class="title-actions" id="title-actions">
             <button id="btn-begin" class="btn primary">Begin Journey</button>
             <button id="btn-continue" class="btn ghost hidden">Continue Journey</button>
             <button id="btn-settings-title" class="btn ghost">Settings</button>
@@ -180,6 +180,15 @@
             <span><b>X</b> skip dialogue</span>
           </div>
           <div class="title-foot">A procedural island · original setting · headphones recommended</div>
+        </div>
+        <div id="new-game-confirm" class="new-game-confirm hidden" role="alertdialog" aria-modal="true" aria-labelledby="new-game-title" aria-describedby="new-game-description">
+          <div class="panel">
+            <div class="eyebrow">A new beginning</div>
+            <h2 id="new-game-title">Replace your journey?</h2>
+            <p id="new-game-description">Starting a new journey replaces your existing save.</p>
+            <button id="btn-confirm-new-game" class="btn danger">Start New Journey</button>
+            <button id="btn-cancel-new-game" class="btn ghost">Keep My Save</button>
+          </div>
         </div>
       </div>
 

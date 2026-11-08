@@ -5,21 +5,30 @@
  */
 
 export const WORLD = Object.freeze({
-  /** Full square size of the terrain mesh, in metres. */
-  size: 1700,
+  /** Full square size of the terrain mesh, in metres. 2026-11-03: ~39× the
+   *  original area (1700 → 10600 m side, radius 560 → 3380 m). */
+  size: 10600,
   /** Nominal land radius before the coastline falloff. */
-  islandRadius: 560,
+  islandRadius: 3380,
   /** Ocean surface height. */
   waterLevel: 0,
   /** Terrain grid resolution (segments per axis). */
-  terrainSegments: 300,
+  terrainSegments: 256,
   /** Master world seed. */
   seed: 20261026,
   /** Length of a full day/night cycle in seconds. */
   dayLength: 420,
   /** Start time, in decimal hours. */
   startHour: 8.4,
+  /** Playable land radius. 2026-11-03: 2900 m keeps a safe water margin
+   *  inside the 3380 m nominal radius. */
+  walkEdge: 3120,
+  /** Multiplicative area vs the original 1700 m island: (10600/1700)^2 ≈ 39×. */
+  areaMultiple: 39,
 });
+
+/** Safe, well-inside-the-island walk limit (see WORLD.walkEdge). */
+export const WALK_EDGE = WORLD.walkEdge ?? 3120;
 
 /** Points of interest. `radius` is the flattened clearing around each one. */
 export const LOCATIONS = Object.freeze({
@@ -79,6 +88,93 @@ export const LOCATIONS = Object.freeze({
       accent: '#5a3f8f',
     }),
   ]),
+  /** Expanded-world frontier: new regions so the ~39× larger island is
+   *  worth crossing. Existing core layout is untouched for save compat. */
+  frontier: Object.freeze([
+    Object.freeze({
+      id: 'aetherMine',
+      name: 'Aether Mine',
+      // 2026-11-03: relocated from (-1020,-690) — raw height 98.6 m put the
+      // timber frame in the snow biome (>82 m). The new south-west lowland
+      // sits at ~26 m in grass with a gentle approach.
+      x: -1020,
+      z: 620,
+      radius: 46,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'emberCastle',
+      name: 'Embercastle',
+      x: 1070,
+      z: -810,
+      radius: 88,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'saltVillage',
+      name: 'Saltmere Village',
+      x: 1340,
+      z: 700,
+      radius: 62,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'sunkenCrypt',
+      name: 'Sunken Crypt',
+      x: -1290,
+      z: 850,
+      radius: 52,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'skyTemple',
+      name: 'Sky-Thread Temple',
+      x: 350,
+      z: -1940,
+      radius: 70,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'glassHollow',
+      name: 'Glasshollow',
+      x: -1750,
+      z: -420,
+      radius: 54,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'emberWastes',
+      name: 'The Ember Wastes',
+      x: 1750,
+      z: 350,
+      radius: 64,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'moonlitDocks',
+      name: 'Moonlit Docks',
+      x: 450,
+      z: 1950,
+      radius: 56,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'stormSpire',
+      name: 'Stormspire',
+      x: -350,
+      z: -2280,
+      radius: 60,
+      targetHeight: null,
+    }),
+    Object.freeze({
+      id: 'frostFjord',
+      name: 'Frostfjord',
+      x: 1950,
+      z: -1250,
+      radius: 58,
+      targetHeight: null,
+    }),
+  ]),
 });
 
 /** Convenience lookup: shard id -> location. */
@@ -126,6 +222,16 @@ export const FLATTEN_ZONES = Object.freeze([
       targetHeight: s.targetHeight,
     }),
   ),
+  ...LOCATIONS.frontier.map((s) =>
+    Object.freeze({
+      id: s.id,
+      x: s.x,
+      z: s.z,
+      radius: s.radius,
+      inner: 0.55,
+      targetHeight: s.targetHeight,
+    }),
+  ),
 ]);
 
 /** Every named place, including shard sites, for minimap + objectives. */
@@ -134,11 +240,17 @@ export const POI_LIST = Object.freeze([
   Object.freeze({ ...LOCATIONS.camp, kind: 'camp' }),
   Object.freeze({ ...LOCATIONS.temple, kind: 'temple' }),
   ...LOCATIONS.shards.map((s) => Object.freeze({ ...s, kind: 'shard' })),
+  ...LOCATIONS.frontier.map((s) => Object.freeze({ ...s, kind: 'frontier' })),
 ]);
 
-/** Human-readable name for an arbitrary world position, used by the HUD. */
+/** Convenience lookup: frontier id -> location. */
+export const FRONTIER_LOCATIONS = Object.freeze(
+  Object.fromEntries(LOCATIONS.frontier.map((s) => [s.id, s])),
+);
+
+  /** Human-readable name for an arbitrary world position, used by the HUD. */
 export function regionNameAt(x, z, locations = LOCATIONS) {
-  const all = [locations.spawn, locations.camp, locations.temple, ...locations.shards];
+  const all = [locations.spawn, locations.camp, locations.temple, ...(locations.frontier ?? []), ...locations.shards];
   let best = null;
   let bestDist = Infinity;
   for (const loc of all) {
@@ -150,8 +262,8 @@ export function regionNameAt(x, z, locations = LOCATIONS) {
   }
   if (best) return best.name;
   const radial = Math.hypot(x, z) / (WORLD.islandRadius * 0.92);
-  if (radial < 0.32) return 'The Heartland';
-  if (radial < 0.62) return 'The Green Reach';
-  if (radial < 0.85) return 'The Outer Wilds';
+  if (radial < 0.28) return 'The Heartland';
+  if (radial < 0.55) return 'The Green Reach';
+  if (radial < 0.78) return 'The Outer Wilds';
   return 'The Sundered Coast';
 }

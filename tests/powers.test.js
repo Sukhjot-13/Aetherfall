@@ -132,6 +132,20 @@ test('stamina is spent and regenerated', () => {
   assert.ok(state.stamina > 60);
 });
 
+test('stamina recovery waits after exertion and only counts time after the delay', () => {
+  const state = createPowerState();
+  consumeStamina(state, 40);
+  tickPowers(state, 0.4);
+  assert.equal(state.stamina, 60);
+  tickPowers(state, 0.3);
+  assert.ok(Math.abs(state.stamina - 62.4) < 1e-6);
+  consumeStamina(state, 1);
+  tickPowers(state, 0.2);
+  assert.ok(Math.abs(state.stamina - 61.4) < 1e-6);
+  revive(state);
+  assert.equal(state.staminaRegenDelay, 0);
+});
+
 test('revive clears death and restores resources', () => {
   const state = createPowerState();
   applyDamage(state, 999);

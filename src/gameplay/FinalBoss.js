@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { clamp, damp, dampAngle } from '../util/math.js';
 import { LOCATIONS } from '../world/locations.js';
 import { createGlowTexture } from '../world/textures.js';
+import { springDamp } from '../player/gait.js';
 import {
   BOSS,
   attackCooldown,
@@ -1115,24 +1116,26 @@ export class FinalBoss {
     const target = a
       ? actionPose(a.kind, this.phase, progress, recovering)
       : idlePose(t);
-    const speed = a ? (recovering ? 18 : 10) : 5;
+    // Soft-body rates: coil is slow/heavy, strike snaps, recover settles.
+    const bodyLambda = recovering ? 9 : a ? 5.5 : 3.2;
+    const armLambda = recovering ? 10 : a ? 6.5 : 3.8;
 
-    this.body.rotation.x = damp(this.body.rotation.x, target.bodyX, speed, dt);
-    this.body.rotation.y = damp(this.body.rotation.y, target.bodyY, speed, dt);
-    this.body.rotation.z = damp(this.body.rotation.z, target.bodyZ, speed, dt);
-    this.body.position.z = damp(this.body.position.z, target.bodyZOffset, speed, dt);
-    this.head.rotation.x = damp(this.head.rotation.x, target.headX, speed, dt);
-    this.head.rotation.y = damp(this.head.rotation.y, target.headY, speed, dt);
-    this.head.rotation.z = damp(this.head.rotation.z, target.headZ, speed, dt);
+    this.body.rotation.x = springDamp(this.body.rotation.x, target.bodyX, bodyLambda, dt);
+    this.body.rotation.y = springDamp(this.body.rotation.y, target.bodyY, bodyLambda, dt);
+    this.body.rotation.z = springDamp(this.body.rotation.z, target.bodyZ, bodyLambda, dt);
+    this.body.position.z = springDamp(this.body.position.z, target.bodyZOffset, bodyLambda, dt);
+    this.head.rotation.x = springDamp(this.head.rotation.x, target.headX, bodyLambda * 0.85, dt);
+    this.head.rotation.y = springDamp(this.head.rotation.y, target.headY, bodyLambda * 0.85, dt);
+    this.head.rotation.z = springDamp(this.head.rotation.z, target.headZ, bodyLambda * 0.85, dt);
 
-    this.armL.shoulder.rotation.x = damp(this.armL.shoulder.rotation.x, target.armLX, speed, dt);
-    this.armL.shoulder.rotation.z = damp(this.armL.shoulder.rotation.z, target.armLZ, speed, dt);
-    this.armL.elbow.rotation.x = damp(this.armL.elbow.rotation.x, target.elbowL, speed, dt);
-    this.armR.shoulder.rotation.x = damp(this.armR.shoulder.rotation.x, target.armRX, speed, dt);
-    this.armR.shoulder.rotation.z = damp(this.armR.shoulder.rotation.z, target.armRZ, speed, dt);
-    this.armR.elbow.rotation.x = damp(this.armR.elbow.rotation.x, target.elbowR, speed, dt);
-    this.blade.rotation.x = damp(this.blade.rotation.x, target.bladeX, speed, dt);
-    this.blade.rotation.z = damp(this.blade.rotation.z, target.bladeZ, speed, dt);
+    this.armL.shoulder.rotation.x = springDamp(this.armL.shoulder.rotation.x, target.armLX, armLambda, dt);
+    this.armL.shoulder.rotation.z = springDamp(this.armL.shoulder.rotation.z, target.armLZ, armLambda, dt);
+    this.armL.elbow.rotation.x = springDamp(this.armL.elbow.rotation.x, target.elbowL, armLambda, dt);
+    this.armR.shoulder.rotation.x = springDamp(this.armR.shoulder.rotation.x, target.armRX, armLambda, dt);
+    this.armR.shoulder.rotation.z = springDamp(this.armR.shoulder.rotation.z, target.armRZ, armLambda, dt);
+    this.armR.elbow.rotation.x = springDamp(this.armR.elbow.rotation.x, target.elbowR, armLambda, dt);
+    this.blade.rotation.x = springDamp(this.blade.rotation.x, target.bladeX, armLambda, dt);
+    this.blade.rotation.z = springDamp(this.blade.rotation.z, target.bladeZ, armLambda, dt);
 
     const charge = target.charge ?? 0;
     const flash = this.flashTimer > 0 ? this.flashTimer / 0.2 : 0;
@@ -1199,8 +1202,17 @@ export class FinalBoss {
       else if (dist < desired - 3) move = -1;
       const speed = (2.1 + this.phase * 0.35) * move;
       const strafe = 1.55 * this.strafeDir;
-      this.root.position.x += (nx * speed - nz * strafe) * dt;
-      this.root.position.z += (nz * speed + nx * strafe) * dt;
+      // Gliding velocity: the Sovereign drifts with weight instead of
+      // teleporting between strafe directions.
+      this._velX = damp(this._velX ?? 0, nx * speed - nz * strafe, 3.0, dt);
+      this._velZ = damp(this._velZ ?? 0, nz * speed + nx * strafe, 3.0, dt);
+      this.root.position.x += this._velX * dt;
+      this.root.position.z += this._velZ * dt;
+    } else {
+      this._velX = damp(this._velX ?? 0, 0, 3.0, dt);
+      this._velZ = damp(this._velZ ?? 0, 0, 3.0, dt);
+      this.root.position.x += this._velX * dt;
+      this.root.position.z += this._velZ * dt;
     }
 
     // Keep the Sovereign inside the ring and off the altar pedestal.

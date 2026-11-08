@@ -31,6 +31,10 @@ export class Menus {
       loadingFill: doc.getElementById('loading-fill'),
       loadingText: doc.getElementById('loading-text'),
       continueBtn: doc.getElementById('btn-continue'),
+      beginBtn: doc.getElementById('btn-begin'),
+      titleActions: doc.getElementById('title-actions'),
+      newGameConfirm: doc.getElementById('new-game-confirm'),
+      cancelNewGame: doc.getElementById('btn-cancel-new-game'),
       endingLines: doc.getElementById('ending-lines'),
       endingStats: doc.getElementById('ending-stats'),
       quality: doc.getElementById('set-quality'),
@@ -60,7 +64,24 @@ export class Menus {
   }
 
   _bind() {
-    this._on('btn-begin', 'click', () => this.handlers.begin?.());
+    this._on('btn-begin', 'click', () => {
+      if (this.hasSave && this.els.newGameConfirm) {
+        this.els.newGameConfirm.classList.remove('hidden');
+        if (this.els.titleActions) this.els.titleActions.inert = true;
+        this.els.cancelNewGame?.focus();
+      } else this.handlers.begin?.();
+    });
+    this._on('btn-confirm-new-game', 'click', () => {
+      this._closeNewGameConfirm(false);
+      this.handlers.begin?.();
+    });
+    this._on('btn-cancel-new-game', 'click', () => this._closeNewGameConfirm());
+    this.els.newGameConfirm?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this._closeNewGameConfirm();
+      }
+    });
     this._on('btn-continue', 'click', () => this.handlers.continueGame?.());
     this._on('btn-settings-title', 'click', () => this.showSettings('title'));
     this._on('btn-resume', 'click', () => this.handlers.resume?.());
@@ -156,8 +177,16 @@ export class Menus {
     this._hide('loading');
   }
 
+  _closeNewGameConfirm(restoreFocus = true) {
+    this.els.newGameConfirm?.classList.add('hidden');
+    if (this.els.titleActions) this.els.titleActions.inert = false;
+    if (restoreFocus) this.els.beginBtn?.focus();
+  }
+
   /** Title screen. */
   showTitle(hasSave = false) {
+    this.hasSave = Boolean(hasSave);
+    this._closeNewGameConfirm(false);
     this._show('title');
     this.els.continueBtn?.classList.toggle('hidden', !hasSave);
   }
@@ -255,6 +284,7 @@ export class Menus {
 
   /** Hide every overlay (used when starting play). */
   hideAll() {
+    this._closeNewGameConfirm(false);
     for (const id of ['title', 'pause', 'settings', 'death', 'ending', 'rematch']) this._hide(id);
   }
 }

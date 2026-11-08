@@ -73,7 +73,7 @@ const FRAGMENT = /* glsl */ `
   float fbm(vec2 p) {
     float v = 0.0;
     float a = 0.5;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 3; i++) {
       v += a * vnoise(p);
       p = p * 2.05 + 7.1;
       a *= 0.5;
@@ -81,9 +81,9 @@ const FRAGMENT = /* glsl */ `
     return v;
   }
 
-  // Slope of a scrolling noise field, used as a wave normal. Sampling the
-  // field three times gives real per-pixel ripples at every distance instead of
-  // the flat sheet the old two-sine version produced.
+  // Slope of a scrolling noise field, used as a wave normal. Two taps at
+  // coarse scale plus one high-frequency tap keep the ripple at a fraction
+  // of the old 6-fbm version's fill cost.
   vec3 waveNormal(vec2 p, float t) {
     float e = 0.6;
     vec2 drift = vec2(t * 0.05, t * 0.03);
@@ -94,9 +94,7 @@ const FRAGMENT = /* glsl */ `
 
     vec2 drift2 = vec2(-t * 0.08, t * 0.06);
     float g0 = fbm(p * 0.21 + drift2);
-    float gx = fbm((p + vec2(e, 0.0)) * 0.21 + drift2);
-    float gz = fbm((p + vec2(0.0, e)) * 0.21 + drift2);
-    slope += vec2(gx - g0, gz - g0) / e * 0.45;
+    slope += vec2(g0 - 0.5, g0 - 0.5) * 0.22;
 
     return normalize(vec3(-slope.x * 3.4, 1.0, -slope.y * 3.4));
   }
@@ -129,12 +127,19 @@ const FRAGMENT = /* glsl */ `
     float foamNoise = fbm(vWorld.xz * 0.8 + vec2(uTime * 0.35, -uTime * 0.22));
     float foam = smoothstep(0.55, 0.95, depthMix) * smoothstep(0.32, 0.72, foamNoise);
     foam += smoothstep(0.86, 1.0, depthMix) * 0.55;
+    // Foam laces — thin bright veins where the noise crosses a threshold, so
+    // the shoreline reads as breaking water rather than a painted edge.
+    float lace = smoothstep(0.44, 0.47, foamNoise) * (1.0 - smoothstep(0.47, 0.56, foamNoise));
+    foam += lace * depthMix * 0.35;
     col = mix(col, vec3(0.92, 0.98, 1.0), clamp(foam, 0.0, 0.85));
 
     float fog = 1.0 - exp(-uFogDensity * uFogDensity * vViewDist * vViewDist);
     col = mix(col, uFogColor, clamp(fog, 0.0, 1.0));
 
-    float alpha = mix(0.9, 0.98, depthMix);
+    // Warm the crest a little when the sun is low — wet sand catches the sunset.
+    col += uSunColor * (1.0 - uDay) * depthMix * 0.06;
+
+    float alpha = mix(0.72, 0.97, depthMix);
     alpha = mix(alpha, 1.0, clamp(foam, 0.0, 1.0));
     gl_FragColor = vec4(col, alpha);
     #include <tonemapping_fragment>
@@ -167,7 +172,7 @@ export class Water {
 
   build() {
     const segments = this.settings?.waterSegments ?? 140;
-    const size = 4200;
+    const size = 12000;
     const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
     geometry.rotateX(-Math.PI / 2);
 

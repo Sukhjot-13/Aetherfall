@@ -14,13 +14,20 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { AudioManager } from './AudioManager.js';
+import { FramePacer } from './FramePacer.js';
 import { Input } from './Input.js';
 import { loadSettings, normalizeSettings, qualityPreset, saveSettings } from './settings.js';
-import { loadSave, writeSave } from './saveState.js';
+import { createSaveData, hydrateSaveData, loadSave, writeSave } from './saveState.js';
 
 import { World } from '../world/World.js';
 import { LOCATIONS, POI_LIST, SHARD_LOCATIONS, WORLD, regionNameAt } from '../world/locations.js';
 import { formatClock } from '../util/math.js';
+import { fbm2 } from '../util/noise.js';
+
+/** Forest mask (mirrors the vegetation field) as a 0..1 weight. */
+function fbm2At(x, z) {
+  return fbm2(x, z, 3, 33) * 0.5 + 0.5;
+}
 
 import { Player } from '../player/Player.js';
 import { CameraRig } from '../player/CameraRig.js';
@@ -43,7 +50,18 @@ import {
   unlockPowers,
 } from '../gameplay/powerState.js';
 import { SPELLS, SPELL_ORDER } from '../gameplay/spellData.js';
-import { STAGES, STAGE_ORDER, createQuestState, objectiveFor, questReducer } from '../gameplay/questState.js';
+import {
+  MISSIONS,
+  SIDE_QUEST,
+  STAGES,
+  STAGE_ORDER,
+  createQuestState,
+  missionDone,
+  objectiveFor,
+  objectiveTarget,
+  questReducer,
+  sideQuestDone,
+} from '../gameplay/questState.js';
 import { DIALOGUES, DEATH_TEXT, ENDING_LINES, buildEndingStats, dialogueForShard } from '../gameplay/story.js';
 
 import { HUD } from '../ui/HUD.js';
@@ -83,6 +101,9 @@ export class Game {
     this._lastNight = -1;
     /** Short grace period after a skip so the same press cannot re-open dialogue. */
     this._dialogueCooldown = 0;
+    this._renderScale = 1;
+    this._framePacer = new FramePacer();
+    this._pacerActive = false;
     this._nightAccum = 0;
     this._bossRetry = false;
     this._rematch = false;
@@ -102,9 +123,9 @@ export class Game {
 
   /* ------------------------------------------------------------------ boot */
 
-  /** Build the renderer, world and every system, then show the title screen. */
   async boot() {
     this._setupRenderer();
+    const bootStart = performance.now();
 
     this.menus = new Menus({
       handlers: {
@@ -127,7 +148,23 @@ export class Game {
 
     this.menus.setLoading(0.02, 'Calling the tide…');
     this.world = new World(this.scene, this.renderer, this.preset);
+    const worldStart = performance.now();
     await this.world.build((progress, label) => this.menus.setLoading(0.04 + progress * 0.86, label));
+    this.bootWorldMs = performance.now() - worldStart;
+    this.menus.setLoading(0.9, 'Warming the shaders…');
+    // Compiling up-front used to stall the loading screen for seconds.
+    // Defer it to an idle slice after the title is up so the island
+    // appears instantly and shaders warm without blocking.
+    // The slice is timed so the win is measurable: the old sync path paid
+    // compileMs on the critical path before the title could paint.
+    this.compileMs = 0;
+    void (async () => {
+      // Let the title paint first.
+      await new Promise((r) => setTimeout(r, 60));
+      const compileStart = performance.now();
+      try { this.renderer.compile(this.scene, this.camera); } catch { /* non-fatal */ }
+      this.compileMs = performance.now() - compileStart;
+    })();
 
     this._setupComposer();
     this._setupEntities();
@@ -147,6 +184,9 @@ export class Game {
     });
 
     this.renderer.setAnimationLoop(() => this.frame());
+    /** Critical-path boot time: renderer setup → title ready (excludes the
+     *  deferred shader compile, which runs after the title paints). */
+    this.bootMs = performance.now() - bootStart;
     return this;
   }
 
@@ -157,19 +197,34 @@ export class Game {
       powerPreference: 'high-performance',
       stencil: false,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.preset.pixelRatio));
+    // Cap at 1.5: 1.75 on a retina display is ~3x the pixels for a
+    // barely-visible gain and was the main source of hangs.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Math.min(1.5, this.preset.pixelRatio)));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.06;
+    this.renderer.toneMappingExposure = 1.02;
     this.renderer.shadowMap.enabled = this.preset.shadows;
     // r186 removed PCFSoftShadowMap; asking for it silently fell back to
     // PCFShadowMap (and logged a warning), so use the supported type directly.
+    // Shadows are expensive to render; update them at 30 Hz while the main
+    // scene remains at display rate. Motion and the day cycle still advance.
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
+    this._shadowTimer = 0;
   }
 
   _setupComposer() {
-    this.composer = new EffectComposer(this.renderer);
+    // EffectComposer renders via a render target, so the renderer's own
+    // antialias flag has no effect — without MSAA samples every silhouette
+    // stair-steps. 2x MSAA restores smooth edges with a smaller GPU cost
+    // than 4x on high-density screens.
+    const rt = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+      samples: 2,
+      type: THREE.HalfFloatType,
+    });
+    this.composer = new EffectComposer(this.renderer, rt);
     this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(window.innerWidth, window.innerHeight);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -322,6 +377,7 @@ export class Game {
     this.finaleTimer = 0;
     this.finalePhase = 0;
     this._bossRetry = false;
+    this._bossStartPhase = 1;
     this._rematch = false;
     if (this.photo) {
       this.photo.active = false;
@@ -332,16 +388,68 @@ export class Game {
     this.hud.hideBossCard();
   }
 
-  _spawnEnemies() {
+  _spawnEnemies(snapshot = null) {
     this.enemies.reset();
-    this.enemies.spawnAmbient(26);
-    const active = this._stageAtLeast(STAGES.SHARDS);
-    for (const loc of LOCATIONS.shards) {
-      if (this.quest.shards.includes(loc.id)) continue;
-      const warden = this.enemies.spawnWarden(loc.id);
-      if (warden) warden.dormant = !active;
+    if (Array.isArray(snapshot?.enemies)) {
+      // Restore the live pre-sandbox encounters, including an unclaimed
+      // shrine whose Warden was already defeated.
+      for (const saved of snapshot.enemies) {
+        const enemy = this.enemies.spawn(saved.type, saved.spawnX, saved.spawnZ, {
+          shardId: saved.shardId, name: saved.name, dormant: saved.dormant,
+        });
+        enemy.position.set(saved.x, saved.y, saved.z);
+        enemy.yaw = saved.yaw;
+        enemy.group.rotation.y = saved.yaw;
+        enemy.health = saved.health;
+        enemy.alive = saved.alive;
+        enemy.aggro = saved.aggro && saved.alive;
+        enemy.engaged = saved.engaged && saved.alive;
+        enemy.attackCooldown = saved.attackCooldown;
+        enemy.slows = saved.slows.map((slow) => ({ ...slow }));
+        if (!saved.alive) {
+          enemy.deadTimer = 0;
+          enemy.group.visible = false;
+          if (enemy.isWarden && enemy.shardId) this.world.structures.setShardSealed(enemy.shardId, false);
+        }
+      }
+      this._trialSpawned = snapshot.trialSpawned;
+      this._huntSpawned = snapshot.huntSpawned;
+    } else {
+      this.enemies.spawnAmbient(26);
+      const active = this._stageAtLeast(STAGES.SHARDS);
+      for (const loc of LOCATIONS.shards) {
+        if (this.quest.shards.includes(loc.id)) continue;
+        const warden = this.enemies.spawnWarden(loc.id);
+        if (warden) warden.dormant = !active;
+      }
+      this._trialSpawned = false;
+      this._huntSpawned = false;
+      this._ensureHuntTargets();
     }
+    this.world.structures?.setLanternsLit(this.quest.sideQuest?.lanternWay ?? 0);
     this.boss?.attach();
+  }
+
+  /** Keep both required trials completable even if earlier enemies died. */
+  _ensureHuntTargets() {
+    if (this.quest.stage !== STAGES.RETURN) return;
+    const trialDone = missionDone(this.quest, 'emberTrial');
+    if (!trialDone && !this._trialSpawned) {
+      this._trialSpawned = true;
+      const remaining = MISSIONS.emberTrial.target - (this.quest.missions.emberTrial ?? 0);
+      this._spawnTrialTargets(remaining, [[-48, 50], [54, 40], [-35, -58]]);
+    } else if (trialDone && !this._huntSpawned && !missionDone(this.quest, 'veilHunt')) {
+      this._huntSpawned = true;
+      const remaining = MISSIONS.veilHunt.target - (this.quest.missions.veilHunt ?? 0);
+      this._spawnTrialTargets(remaining, [[-48, 52], [58, 30], [-20, -64], [65, -28], [-64, -25]]);
+    }
+  }
+
+  _spawnTrialTargets(count, spots) {
+    const camp = LOCATIONS.camp;
+    for (let i = 0; i < count; i++) {
+      this.enemies.spawn(i % 2 ? 'drifter' : 'stalker', camp.x + spots[i][0], camp.z + spots[i][1]);
+    }
   }
 
   _stageAtLeast(stage) {
@@ -361,21 +469,49 @@ export class Game {
    * @param {boolean} on
    */
   setMaster(on) {
-    this.master.enabled = Boolean(on);
-    if (!this.master.enabled) {
-      this.master.fly = false;
-      this.player.fly = false;
-      this.powers.infinite = false;
-      this.hud?.setMaster(false);
-      this.toasts?.push('Master mode off.', 'mint', 2000);
-      this.audio?.ui();
+    const enabled = Boolean(on);
+    if (enabled === this.master.enabled) return;
+    if (enabled) {
+      // Preserve the live run separately; sandbox changes must never be
+      // written to the durable save or leak back into regular play.
+      this._masterSnapshot = this._captureSandboxSnapshot();
+      this.master.enabled = true;
+      this._applyMaster();
+      this.hud?.setMaster(true, false);
+      this.toasts?.push('Master mode ON — unlimited mana · F fly · [ ] time · ` exit', 'gold', 5200);
+      this.audio?.quest();
       return;
     }
 
-    this._applyMaster();
-    this.hud?.setMaster(true, false);
-    this.toasts?.push('Master mode ON — unlimited mana · F fly · [ ] time · ` exit', 'gold', 5200);
-    this.audio?.quest();
+    const snapshot = this._masterSnapshot;
+    this._masterSnapshot = null;
+    this.master.enabled = false;
+    this.master.fly = false;
+    this.player.fly = false;
+    this.powers.infinite = false;
+    if (snapshot) this._continueGame(snapshot);
+    this.hud?.setMaster(false);
+    this.toasts?.push('Master mode off — your journey is restored.', 'mint', 2600);
+    this.audio?.ui();
+  }
+
+  /** Copy the current run without writing to storage. */
+  _captureSandboxSnapshot() {
+    const snapshot = hydrateSaveData(createSaveData(this._saveSnapshot()));
+    // Transient powers and camera orientation are meaningful when returning
+    // to an in-progress run, even though normal disk saves omit them.
+    snapshot.powers = { ...this.powers, unlocked: [...this.powers.unlocked], cooldowns: { ...this.powers.cooldowns } };
+    snapshot.cameraState = { ...this.cameraRig.state };
+    snapshot.enemies = this.enemies.all().filter((enemy) => !enemy.isBoss && !enemy.summoned).map((enemy) => ({
+      type: enemy.type, shardId: enemy.shardId, name: enemy.name, dormant: enemy.dormant,
+      spawnX: enemy.spawnPoint.x, spawnZ: enemy.spawnPoint.z,
+      x: enemy.position.x, y: enemy.position.y, z: enemy.position.z, yaw: enemy.yaw,
+      health: enemy.health, alive: enemy.alive, aggro: enemy.aggro, engaged: enemy.engaged,
+      attackCooldown: enemy.attackCooldown, slows: (enemy.slows ?? []).map((slow) => ({ ...slow })),
+    }));
+    snapshot.trialSpawned = this._trialSpawned;
+    snapshot.huntSpawned = this._huntSpawned;
+    return snapshot;
   }
 
   /** Grant everything and restore the world without touching the save file. */
@@ -400,6 +536,11 @@ export class Game {
       shards: LOCATIONS.shards.map((shard) => shard.id),
       sableMet: true,
       beaconRestored: true,
+      missions: {
+        emberTrial: MISSIONS.emberTrial.target,
+        veilHunt: MISSIONS.veilHunt.target,
+      },
+      sideQuest: { lanternWay: SIDE_QUEST.target },
     });
 
     for (const [id] of this.world.shardSites) {
@@ -467,8 +608,8 @@ export class Game {
     this._save();
   }
 
-  _continueGame() {
-    const save = this.saveSlot ?? loadSave();
+  _continueGame(snapshot = null) {
+    const save = snapshot ?? this.saveSlot ?? loadSave();
     if (!save) {
       this._startNewGame();
       return;
@@ -482,6 +623,14 @@ export class Game {
     // grant the powers bound to it, even if the save predates that unlock or
     // was captured between the two writes.
     for (const id of this.quest.shards) unlockPowers(this.powers, id);
+    // Old saves lack maxHealth/maxMana/maxStamina: replay earned mission
+    // rewards from quest state so those characters keep their upgrades.
+    if (missionDone(this.quest, 'emberTrial') && this.powers.maxHealth === 100) this.powers.maxHealth = 112;
+    if (missionDone(this.quest, 'veilHunt') && this.powers.maxMana === 100) this.powers.maxMana = 112;
+    if (sideQuestDone(this.quest) && this.powers.maxStamina === 100) this.powers.maxStamina = 110;
+    this.powers.health = Math.min(this.powers.health, this.powers.maxHealth);
+    this.powers.mana = Math.min(this.powers.mana, this.powers.maxMana);
+    this.powers.stamina = Math.min(this.powers.stamina, this.powers.maxStamina);
 
     this.world.setTimeOfDay(save.world.timeOfDay);
     this.world.sky?.setRestored(this.quest.beaconRestored);
@@ -489,6 +638,7 @@ export class Game {
     this.cameraRig.state.yaw = save.player.yaw;
     this.cameraRig.state.pitch = -0.08;
     this.player.teleport(save.player.x, save.player.y, save.player.z, save.player.yaw);
+    if (save.cameraState) Object.assign(this.cameraRig.state, save.cameraState);
     this.cameraRig.snap();
 
     // A save taken during the finale restarts at the altar so the Sovereign
@@ -509,7 +659,7 @@ export class Game {
     }
     if (this.quest.beaconRestored) this.world.restoreBeacon();
 
-    this._spawnEnemies();
+    this._spawnEnemies(save);
     if (this._stageAtLeast(STAGES.SHARDS)) this.enemies.activateWardens();
     if (this.master.enabled) this._applyMaster();
 
@@ -544,7 +694,12 @@ export class Game {
   }
 
   _returnToTitle() {
+    const sandboxSnapshot = this.master.enabled ? this._masterSnapshot : null;
     if (this.state === 'playing' || this.state === 'paused') this._save();
+    this.master.enabled = false;
+    this.master.fly = false;
+    this.player.fly = false;
+    this._masterSnapshot = null;
     this._rematch = false;
     this.dialogue.onComplete = null;
     this.dialogue.close();
@@ -554,7 +709,7 @@ export class Game {
     this._bossRetry = false;
     this.toasts.clear();
     this.menus.hideAll();
-    this.saveSlot = loadSave();
+    this.saveSlot = sandboxSnapshot ?? loadSave();
     this.menus.showTitle(Boolean(this.saveSlot));
     this.hud.hide();
     this.hud.setCinematic(false);
@@ -564,26 +719,34 @@ export class Game {
   }
 
   _manualSave() {
+    if (this.master.enabled) {
+      this.toasts.push('Master mode is a sandbox; your regular journey is kept separately.', 'warn', 3200);
+      this.audio.ui();
+      return;
+    }
     const ok = this._save();
     this.toasts.push(ok ? 'Journey saved.' : 'Could not write the save.', ok ? 'mint' : 'warn');
     this.audio.ui();
   }
 
+  _saveSnapshot() {
+    return {
+      quest: this.quest,
+      powers: this.powers,
+      player: {
+        x: this.player.position.x, y: this.player.position.y,
+        z: this.player.position.z, yaw: this.player.yaw,
+      },
+      world: { timeOfDay: this.world.timeOfDay },
+      camera: { mode: this.cameraRig.mode },
+      stats: {},
+    };
+  }
+
   _save() {
+    if (this.master.enabled) return false;
     try {
-      const ok = writeSave({
-        quest: this.quest,
-        powers: this.powers,
-        player: {
-          x: this.player.position.x,
-          y: this.player.position.y,
-          z: this.player.position.z,
-          yaw: this.player.yaw,
-        },
-        world: { timeOfDay: this.world.timeOfDay },
-        camera: { mode: this.cameraRig.mode },
-        stats: {},
-      });
+      const ok = writeSave(this._saveSnapshot());
       if (ok) this.saveSlot = loadSave();
       return ok;
     } catch {
@@ -617,10 +780,22 @@ export class Game {
     }
 
     for (const [id, site] of this.world.shardSites) {
-      if (site.collected || site.sealed) continue;
+      if (this.quest.stage !== STAGES.SHARDS || site.collected || site.sealed) continue;
       const d = Math.hypot(p.x - site.location.x, p.z - site.location.z);
       if (d < 7) {
         this.interaction = { kind: 'shard', id, label: 'Claim the Aether Shard' };
+        return;
+      }
+    }
+
+    // Side quest: the Lantern Way. Only the next unlit lantern can be woken.
+    const lanterns = this.world.structures?.lanterns ?? [];
+    const litCount = this.quest.sideQuest?.lanternWay ?? 0;
+    const next = lanterns[litCount];
+    if (next && !sideQuestDone(this.quest)) {
+      const d = Math.hypot(p.x - next.x, p.z - next.z);
+      if (d < 6) {
+        this.interaction = { kind: 'lantern', label: 'Wake the old lantern' };
         return;
       }
     }
@@ -634,6 +809,7 @@ export class Game {
     if (!action) return;
     if (action.kind === 'talk') this._talk(action.npc);
     else if (action.kind === 'shard') this._claimShard(action.id);
+    else if (action.kind === 'lantern') this._wakeLantern();
     else if (action.kind === 'altar') {
       if (this.quest.stage === STAGES.FINALE) this._startFinale();
       else if (this.quest.stage === STAGES.FREE) this._openRematch();
@@ -641,14 +817,47 @@ export class Game {
     }
   }
 
+  /** Wake one lantern on the Lantern Way; the reward is a steadier breath. */
+  _wakeLantern() {
+    const lit = this.quest.sideQuest?.lanternWay ?? 0;
+    if (lit >= SIDE_QUEST.target) return;
+    this.quest.sideQuest.lanternWay = lit + 1;
+    this.world.structures?.setLanternsLit(this.quest.sideQuest.lanternWay);
+    const lantern = this.world.structures?.lanterns?.[lit];
+    const point = new THREE.Vector3(lantern?.x ?? this.player.position.x, (lantern?.y ?? 0) + 4, lantern?.z ?? this.player.position.z);
+    this.effects.ring(point, { color: '#ffd27a', radius: 8, life: 0.9, opacity: 0.9 });
+    this.effects.burst(point, { count: 40, color: '#ffe9a8', speed: 6, size: 0.35, life: 1, gravity: -1, drag: 1.5 });
+    this.effects.light(point, { color: '#ffd27a', intensity: 14, distance: 44, life: 1.2 });
+    this.audio?.quest();
+    const done = this.quest.sideQuest.lanternWay >= SIDE_QUEST.target;
+    this.toasts.push(
+      done
+        ? 'The Lantern Way burns bright — your breath deepens, your step lightens.'
+        : `Lantern woke ${this.quest.sideQuest.lanternWay} / ${SIDE_QUEST.target}`,
+      'gold',
+      4600,
+    );
+    if (done) {
+      this.powers.maxStamina += SIDE_QUEST.reward.maxStaminaBonus;
+      this.powers.stamina = this.powers.maxStamina;
+    }
+    this._save();
+  }
+
   _talk(npc) {
     const stage = this.quest.stage;
     let lines;
     if (npc.id === 'sable') {
       if (stage === STAGES.MEET_SABLE) lines = DIALOGUES.sableIntro;
-      else if (stage === STAGES.RETURN) lines = DIALOGUES.sableReturn;
+      else if (stage === STAGES.RETURN) lines = !missionDone(this.quest, 'emberTrial') ? DIALOGUES.sableTrialPending : missionDone(this.quest, 'veilHunt') ? DIALOGUES.sableReady : DIALOGUES.sableReturn;
       else if (stage === STAGES.FREE) lines = DIALOGUES.sableFree;
       else lines = DIALOGUES.sableHint;
+    } else if (npc.id === 'wisp') {
+      if (stage === STAGES.AWAKEN) lines = DIALOGUES.intro;
+      else if (stage === STAGES.RETURN) lines = !missionDone(this.quest, 'emberTrial') ? DIALOGUES.wispTrialPending : missionDone(this.quest, 'veilHunt') ? DIALOGUES.wispReady : DIALOGUES.allShards;
+      else if (stage === STAGES.FREE) lines = DIALOGUES.freeRoam;
+      else if (sideQuestDone(this.quest)) lines = DIALOGUES.lanternDone;
+      else lines = DIALOGUES.lanternWay;
     } else if (stage === STAGES.AWAKEN) {
       lines = DIALOGUES.wispHint;
     } else if (stage === STAGES.RETURN) {
@@ -666,10 +875,16 @@ export class Game {
       this.player.model.root.rotation.y = this.player.yaw;
     }
 
+    // First wisp chat is the intro — talking to the Wisp advances the quest.
+    // Later chats are side-quest flavour or hints and do not advance anything.
+    const isIntro = npc.id === 'wisp' && stage === STAGES.AWAKEN;
+    const beginsShardHunt = npc.id === 'sable' && stage === STAGES.MEET_SABLE;
     this.dialogue.show(lines, {
-      onComplete: () => this._questEvent({ type: 'talk', npc: npc.id }),
+      onComplete: () => {
+        if (isIntro || beginsShardHunt) this._questEvent({ type: 'talk', npc: npc.id });
+      },
     });
-    this.audio.ui();
+    this.audio?.talk?.();
   }
 
   /**
@@ -699,8 +914,8 @@ export class Game {
 
   _claimShard(id) {
     const site = this.world.shardSites.get(id);
-    if (!site || site.sealed || site.collected) return;
-
+    if (!site || site.sealed || site.collected || this.quest.stage !== STAGES.SHARDS) return;
+    if (!this._questEvent({ type: 'collect-shard', id })) return;
     this.world.structures.collectShard(id);
     const point = new THREE.Vector3(site.location.x, site.baseY + 3, site.location.z);
     this.effects.ring(new THREE.Vector3(point.x, site.baseY + 0.2, point.z), {
@@ -723,7 +938,6 @@ export class Game {
     this.cameraRig.addShake(0.35);
     this.audio.quest();
 
-    this._questEvent({ type: 'collect-shard', id });
   }
 
   /**
@@ -735,6 +949,13 @@ export class Game {
     Object.assign(this.quest, state);
     if (changed && this._stageAtLeast(STAGES.SHARDS)) this.enemies.activateWardens();
     for (const effect of effects) this._handleQuestEffect(effect);
+    if (changed) this._ensureHuntTargets();
+    // Durable progress saves immediately: shards, stage changes, mission
+    // completes and the finale all survive a crash without waiting up to
+    // 55 s for the autosave. Plain kill counters ride the autosave.
+    if (changed && effects.some((e) => ['unlock', 'mission-complete', 'side-quest-complete', 'finale', 'beacon-restored', 'objective'].includes(e.type))) {
+      this._save();
+    }
     return changed;
   }
 
@@ -757,6 +978,25 @@ export class Game {
         if (lines?.length) this.dialogue.show(lines);
         break;
       }
+      case 'mission-complete': {
+        const mission = MISSIONS[effect.missionId];
+        if (!mission) break;
+        if (mission.reward?.maxHealthBonus) {
+          this.powers.maxHealth += mission.reward.maxHealthBonus;
+          this.powers.health = this.powers.maxHealth;
+        }
+        if (mission.reward?.maxManaBonus) {
+          this.powers.maxMana += mission.reward.maxManaBonus;
+          this.powers.mana = this.powers.maxMana;
+        }
+        this.toasts.push(`${mission.name} complete — the Beacon deepens your spark.`, 'gold', 5200);
+        this.audio.quest();
+        break;
+      }
+      case 'side-quest-complete':
+        this.powers.maxStamina += SIDE_QUEST.reward.maxStaminaBonus;
+        this.powers.stamina = this.powers.maxStamina;
+        break;
       case 'finale':
         this._startFinale();
         break;
@@ -790,7 +1030,9 @@ export class Game {
   }
 
   _onEnemyKilled(enemy) {
-    this.quest.kills += 1;
+    // Route through the quest reducer so kills also advance missions and the
+    // side quest, and so the counters can never drift apart.
+    this._questEvent({ type: 'enemy-killed' });
     if (enemy.isWarden && enemy.shardId) {
       this.world.structures.setShardSealed(enemy.shardId, false);
       const loc = SHARD_LOCATIONS[enemy.shardId];
@@ -826,7 +1068,7 @@ export class Game {
     this.magic.clear();
     if (this._bossRetry && this.boss) {
       this.boss.reset();
-      this.boss.begin();
+      this.boss.begin(this._bossStartPhase ?? 1);
       this.boss.activate();
       const x = this.boss.center.x;
       const z = this.boss.center.z + 18;
@@ -856,7 +1098,11 @@ export class Game {
     for (const enemy of this.enemies.all()) {
       enemy.aggro = false;
       enemy.engaged = false;
+      enemy.cancelTelegraph?.();
+      enemy.cancelTelegraph = null;
       enemy.windup = 0;
+      enemy.lunge = 0;
+      if (!enemy.isBoss && enemy.alive) enemy.returning = true;
       enemy.attackCooldown = 1.5;
     }
     this.menus.hideAll();
@@ -888,6 +1134,7 @@ export class Game {
   _startFinale(startPhase = 1) {
     if (this.state === 'finale' || this.boss?.active) return;
     this.state = 'finale';
+    this._bossStartPhase = startPhase;
     this.finaleTimer = 0;
     this.finalePhase = 0;
     this.player.velocity.set(0, 0, 0);
@@ -1071,10 +1318,27 @@ export class Game {
   /* ---------------------------------------------------------------- update */
 
   frame() {
-    const dt = Math.min(0.05, this.clock.getDelta() || 0.016);
+    const frameTime = this.clock.getDelta() || 0.016;
+    const dt = Math.min(0.05, frameTime);
     this.elapsed += dt;
-    this.fps = this.fps * 0.93 + (1 / Math.max(0.001, dt)) * 0.07;
-
+    const pacingActive = (this.state === 'playing' || this.state === 'finale') && !document.hidden;
+    if (pacingActive !== this._pacerActive) {
+      this._framePacer.reset();
+      this._pacerActive = pacingActive;
+    }
+    if (pacingActive) {
+      const sample = this._framePacer.sample(frameTime);
+      if (sample) {
+        this.fps = sample.fps;
+        this._updateAdaptiveRenderScale(sample.step);
+      }
+    }
+    this._shadowTimer += dt;
+    if (this._shadowTimer >= 1 / 30) {
+      this._shadowTimer %= 1 / 30;
+      this.renderer.shadowMap.needsUpdate = true;
+    }
+    if (this.state === 'playing') this.quest.playSeconds = (this.quest.playSeconds ?? 0) + dt;
     if (this.dialogue?.isOpen) {
       // X (or Esc) drops the entire conversation in one press; E/click just
       // finishes the current line. Handled before the state switch so a skip
@@ -1125,6 +1389,8 @@ export class Game {
     this.cameraRig.update(dt, {
       position: this.player.position,
       speed: this.state === 'playing' ? this.player.speed : 0,
+      velocity: this.player.velocity,
+      dodging: this.state === 'playing' && this.player.dodgeTime > 0,
     });
 
     if (this.state !== 'paused' && this.state !== 'loading') this._updateHud();
@@ -1166,7 +1432,7 @@ export class Game {
       this.toasts.push(muted ? 'Audio muted' : 'Audio on', 'mint', 1600);
     }
 
-    if (input.wasPressed('master')) this.toggleMaster();
+    if (!talking && input.wasPressed('master')) this.toggleMaster();
     if (this.master.enabled) {
       if (input.wasPressed('fly')) this.toggleFly();
       if (input.wasPressed('timeBack')) this._shiftTime(-2);
@@ -1332,6 +1598,31 @@ export class Game {
       this._lastNight = night;
       this.audio?.setNight(night);
     }
+    // Environment follows the player: shore wash near water, leaf whisper
+    // under the canopy, thin gusts at altitude. Forest mask mirrors the
+    // vegetation field so the sound matches the trees you see.
+    const p = this.player?.position;
+  // Biological sound thread: dawn chorus arpeggios by day, frog croaks at
+    // water, owl hoots at night, thin keening at altitude. Throttled to
+    // ~0.8 Hz so it reads as creatures in the background, not a beep.
+    this._bioTimer = (this._bioTimer ?? 0) + dt;
+    if (this._bioTimer > 1.25 && p && this.audio?.biomeSting) {
+      this._bioTimer = 0;
+      const h = this.world.heightAt(p.x, p.z);
+      const shore = Math.max(0, Math.min(1, (h - 0.5) / 9));
+      const forest = fbm2At(p.x * 0.0055, p.z * 0.0055);
+      const altitude = Math.max(0, Math.min(1, (h - 35) / 60));
+      const nightF = this.world.nightFactor ?? 0;
+      this.audio.biomeSting({ shore, forest, altitude, night: nightF });
+    }
+    if (p && this.audio?.setEnvironment) {
+      const h = this.world.heightAt(p.x, p.z);
+      const shore = Math.max(0, Math.min(1, (h - 0.5) / 9));
+      const forest = fbm2At(p.x * 0.0055, p.z * 0.0055);
+      const altitude = Math.max(0, Math.min(1, (h - 35) / 60));
+      this.audio.setEnvironment({ shore, forest, altitude });
+      if (this.player.speed > 8) this.audio.whoosh((this.player.speed - 8) / 4);
+    }
   }
 
   _updateHud() {
@@ -1357,10 +1648,14 @@ export class Game {
     });
     this.hud.updateAimLock(playing && !this.dialogue.isOpen ? this.magic.aimTarget : null, this.camera);
 
-    if (playing || this.state === 'finale') {
+    // Minimap redraws at ~15 Hz — full-rate canvas work was pure waste.
+    this._minimapTimer = (this._minimapTimer ?? 0) + 1;
+    if ((playing || this.state === 'finale') && this._minimapTimer % 4 === 0) {
       this.minimap.draw(this.player.position, this.cameraRig.state.yaw, {
         quest: this.quest,
         enemies: this.enemies.all(),
+        lanterns: this.world.structures?.lanterns ?? [],
+        lanternLit: this.quest.sideQuest?.lanternWay ?? 0,
       });
     }
   }
@@ -1394,6 +1689,7 @@ export class Game {
   _applyQuality() {
     this.preset = qualityPreset(this.settings);
     this.renderer.shadowMap.enabled = this.preset.shadows;
+    this.renderer.shadowMap.needsUpdate = true;
     this.world?.setQuality(this.preset);
     if (this.bloomPass) this.bloomPass.enabled = this.preset.bloom;
     this.useComposer = this.preset.bloom;
@@ -1403,14 +1699,31 @@ export class Game {
   _resize() {
     const w = window.innerWidth;
     const h = Math.max(1, window.innerHeight);
-    const dpr = Math.min(window.devicePixelRatio || 1, this.preset.pixelRatio);
-    this.renderer.setPixelRatio(dpr);
-    this.renderer.setSize(w, h);
+    // Hard 1.5 cap: preset ratios above this (ultra 1.75) cost ~2x fill for
+    // invisible gain and were the main reason the game lagged on retina.
+    const dpr = Math.min(window.devicePixelRatio || 1, Math.min(1.5, this.preset.pixelRatio)) * this._renderScale;
+    const old = this._lastRenderSize;
+    const dimensionsChanged = !old || old.w !== w || old.h !== h;
+    const ratioChanged = !old || old.dpr !== dpr;
+    // setPixelRatio already resizes both renderer and composer. Avoid doing
+    // the expensive allocation twice when only adaptive resolution changes.
+    if (ratioChanged) this.renderer.setPixelRatio(dpr);
+    if (dimensionsChanged) this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     if (this.composer) {
-      this.composer.setPixelRatio(dpr);
-      this.composer.setSize(w, h);
+      if (ratioChanged) this.composer.setPixelRatio(dpr);
+      if (dimensionsChanged) this.composer.setSize(w, h);
     }
+    this._lastRenderSize = { w, h, dpr };
+  }
+
+  /** Adaptive resolution: trade pixels for frame rate under sustained load. */
+  _updateAdaptiveRenderScale(step) {
+    if (!step) return;
+    const next = Math.max(0.6, Math.min(1, this._renderScale + step));
+    if (next === this._renderScale) return;
+    this._renderScale = next;
+    this._resize();
   }
 }

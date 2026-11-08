@@ -177,12 +177,45 @@ export class Minimap {
     drawPoi(LOCATIONS.camp.x, LOCATIONS.camp.z, '#ffcf8a', 3.4, 'C');
     drawPoi(LOCATIONS.temple.x, LOCATIONS.temple.z, '#ffe9a8', 3.8, 'B');
     drawPoi(LOCATIONS.spawn.x, LOCATIONS.spawn.z, '#9fd8c8', 2.6, '');
+    // Frontier sites (mine / castle / village / crypt / sky-temple).
+    for (const loc of (LOCATIONS.frontier ?? [])) {
+      drawPoi(loc.x, loc.z, '#c9a7ff', 3.2, 'F');
+    }
+    // Off-screen frontier hint: pulse toward nearest unseen frontier.
+    {
+      let best = null; let bestD = Infinity;
+      for (const loc of (LOCATIONS.frontier ?? [])) {
+        const d = Math.hypot(loc.x - player.x, loc.z - player.z);
+        if (d < bestD) { bestD = d; best = loc; }
+      }
+      if (best && bestD > 120) {
+        const p = project(best.x, best.z);
+        const inView = p.x >= 0 && p.x <= SIZE && p.y >= 0 && p.y <= SIZE;
+        if (!inView) {
+          const dx = p.x - SIZE / 2, dy = p.y - SIZE / 2;
+          const len = Math.hypot(dx, dy) || 1;
+          const ex = SIZE / 2 + (dx / len) * (SIZE / 2 - 10);
+          const ey = SIZE / 2 + (dy / len) * (SIZE / 2 - 10);
+          ctx.fillStyle = '#c9a7ff'; ctx.globalAlpha = 0.85;
+          ctx.beginPath(); ctx.moveTo(ex, ey - 5); ctx.lineTo(ex + 4, ey + 4); ctx.lineTo(ex - 4, ey + 4); ctx.closePath(); ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
 
     const collected = state.quest?.shards ?? [];
     for (const shard of LOCATIONS.shards) {
       if (collected.includes(shard.id)) continue;
       drawPoi(shard.x, shard.z, shard.color, 3, '◆');
     }
+
+    // Side-quest lanterns: lit ones gold, the next one ringed, the rest dim.
+    const lanterns = state.lanterns ?? [];
+    const litCount = state.lanternLit ?? 0;
+    lanterns.forEach((lantern, i) => {
+      if (i < litCount) drawPoi(lantern.x, lantern.z, '#ffd27a', 2.6, 'L');
+      else if (i === litCount) drawPoi(lantern.x, lantern.z, '#fff6d8', 3.2, 'L');
+    });
 
     // Objective marker.
     const target = state.quest ? objectiveTarget(state.quest) : null;
